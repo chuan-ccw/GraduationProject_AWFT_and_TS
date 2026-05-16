@@ -108,7 +108,7 @@ if if_using_ppo:
     model_ppo.set_logger(new_logger_ppo)
 
 trained_ppo = (
-    agent.train_model(model=model_ppo, tb_log_name="ppo", total_timesteps=20000)
+    agent.train_model(model=model_ppo, tb_log_name="ppo", total_timesteps=10000)
     if if_using_ppo
     else None
 )
