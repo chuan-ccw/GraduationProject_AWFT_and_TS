@@ -14,6 +14,8 @@ import pandas as pd
 import yfinance as yf
 
 from finrl import config_tickers
+import finrl.config as config
+print("config path:", config.__file__)
 from finrl.config import INDICATORS
 from finrl.config import TRADE_END_DATE
 from finrl.config import TRADE_START_DATE
@@ -23,21 +25,21 @@ from finrl.meta.preprocessor.preprocessors import data_split
 from finrl.meta.preprocessor.preprocessors import FeatureEngineer
 from finrl.meta.preprocessor.yahoodownloader import YahooDownloader
 
-# %% Part 1. Fetch data - Single ticker
+# # %% Part 1. Fetch data - Single ticker
 
-# Using yfinance directly
-aapl_df_yf = yf.download(tickers="aapl", start="2020-01-01", end="2020-01-31")
-print("=== yfinance download ===")
-print(aapl_df_yf.head())
+# # Using yfinance directly
+# aapl_df_yf = yf.download(tickers="aapl", start="2020-01-01", end="2020-01-31")
+# print("=== yfinance download ===")
+# print(aapl_df_yf.head())
 
-# Using FinRL's YahooDownloader
-aapl_df_finrl = YahooDownloader(
-    start_date="2020-01-01",
-    end_date="2020-01-31",
-    ticker_list=["aapl"],
-).fetch_data()
-print("\n=== FinRL YahooDownloader ===")
-print(aapl_df_finrl.head())
+# # Using FinRL's YahooDownloader
+# aapl_df_finrl = YahooDownloader(
+#     start_date="2020-01-01",
+#     end_date="2020-01-31",
+#     ticker_list=["aapl"],
+# ).fetch_data()
+# print("\n=== FinRL YahooDownloader ===")
+# print(aapl_df_finrl.head())
 
 # %% Part 2. Fetch data - DOW 30 tickers
 
@@ -51,6 +53,7 @@ df_raw = YahooDownloader(
 ).fetch_data()
 print("\n=== Raw data ===")
 print(df_raw.head())
+print(df_raw.tail())
 
 # %% Part 3. Preprocess data
 
@@ -79,6 +82,7 @@ processed_full = processed_full.fillna(0)
 
 print("\n=== Processed data ===")
 print(processed_full.head())
+print(processed_full.tail())
 
 # %% Part 4. Split and save data
 
