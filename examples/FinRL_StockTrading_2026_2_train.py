@@ -55,11 +55,11 @@ print(type(env_train))
 
 # %% Part 3. Train DRL Agents
 
-if_using_a2c = True
-if_using_ddpg = True
+if_using_a2c = False
+if_using_ddpg = False
 if_using_ppo = True
-if_using_td3 = True
-if_using_sac = True
+if_using_td3 = False
+if_using_sac = False
 
 # --- Agent 1: A2C ---
 agent = DRLAgent(env=env_train)

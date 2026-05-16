@@ -35,11 +35,11 @@ trade.index.names = [""]
 
 # %% Part 2. Load trained agents
 
-if_using_a2c = True
-if_using_ddpg = True
+if_using_a2c = False
+if_using_ddpg = False
 if_using_ppo = True
-if_using_td3 = True
-if_using_sac = True
+if_using_td3 = False
+if_using_sac = False
 
 trained_a2c = A2C.load(TRAINED_MODEL_DIR + "/agent_a2c") if if_using_a2c else None
 trained_ddpg = DDPG.load(TRAINED_MODEL_DIR + "/agent_ddpg") if if_using_ddpg else None
