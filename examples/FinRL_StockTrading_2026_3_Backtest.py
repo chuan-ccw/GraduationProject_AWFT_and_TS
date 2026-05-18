@@ -2,7 +2,7 @@
 Stock NeurIPS2018 Part 3. Backtest
 
 This series is a reproduction of paper "Deep reinforcement learning for
-automated stock trading: An ensemble strategy".
+automated stock trading: an ensemble strategy".
 
 Introducing how to use the agents we trained to do backtest, and compare with baselines such as
 Mean Variance Optimization and DJIA index.
@@ -10,6 +10,7 @@ Mean Variance Optimization and DJIA index.
 
 from __future__ import annotations
 
+import os
 import matplotlib
 
 matplotlib.use("Agg")
@@ -22,6 +23,11 @@ from finrl.agents.stablebaselines3.models import DRLAgent
 from finrl.config import INDICATORS, TRAINED_MODEL_DIR, TRADE_START_DATE, TRADE_END_DATE
 from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
 from finrl.meta.preprocessor.yahoodownloader import YahooDownloader
+
+# %% Part 0. Create output folder
+
+OUTPUT_DIR = "backtest_result"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # %% Part 1. Load data
 
@@ -133,6 +139,19 @@ covReturns = np.cov(arReturns, rowvar=False)
 np.set_printoptions(precision=3, suppress=True)
 print("Mean returns of assets in portfolio\n", meanReturns)
 
+# Save meanReturns to CSV
+mean_returns_df = pd.DataFrame(
+    {
+        "tic": StockData.columns,
+        "mean_return": meanReturns,
+    }
+)
+
+mean_returns_csv_path = os.path.join(OUTPUT_DIR, "meanReturns.csv")
+mean_returns_df.to_csv(mean_returns_csv_path, index=False)
+
+print(f"\nMean returns saved to {mean_returns_csv_path}")
+
 from pypfopt.efficient_frontier import EfficientFrontier
 
 ef_mean = EfficientFrontier(meanReturns, covReturns, weight_bounds=(0, 0.5))
@@ -208,6 +227,12 @@ result = pd.DataFrame(
 print("\n=== Backtest Results ===")
 print(result)
 
+# Save backtest results to CSV
+backtest_csv_path = os.path.join(OUTPUT_DIR, "backtest_results.csv")
+result.to_csv(backtest_csv_path, index=True)
+
+print(f"\nBacktest results saved to {backtest_csv_path}")
+
 # %% Part 7. Plot
 
 plt.rcParams["figure.figsize"] = (15, 5)
@@ -216,5 +241,8 @@ result.plot()
 plt.title("Portfolio Value Over Time")
 plt.xlabel("Date")
 plt.ylabel("Portfolio Value ($)")
-plt.savefig("backtest_result_v0.png", dpi=150, bbox_inches="tight")
-print("\nPlot saved to backtest_result_v0.png")
+
+plot_path = os.path.join(OUTPUT_DIR, "backtest_result_v0.png")
+plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+
+print(f"\nPlot saved to {plot_path}")
