@@ -219,7 +219,7 @@ print("\n=== Backtest Results ===")
 print(result)
 
 # Save backtest results to CSV
-backtest_csv_path = os.path.join(OUTPUT_DIR, f"backtest_results_{today_str}.csv")
+backtest_csv_path = os.path.join(OUTPUT_DIR, f"backtest_result_v1_{TRADE_START_DATE}_to_{TRADE_END_DATE}_{today_str}.csv")
 result.to_csv(backtest_csv_path, index=True)
 
 print(f"\nBacktest results saved to {backtest_csv_path}")
@@ -233,7 +233,7 @@ plt.title("Portfolio Value Over Time")
 plt.xlabel("Date")
 plt.ylabel("Portfolio Value ($)")
 
-plot_path = os.path.join(OUTPUT_DIR, f"backtest_result_{today_str}.png")
+plot_path = os.path.join(OUTPUT_DIR, f"backtest_result_v1_{TRADE_START_DATE}_to_{TRADE_END_DATE}_{today_str}.png")
 plt.savefig(plot_path, dpi=150, bbox_inches="tight")
 
 print(f"\nPlot saved to {plot_path}")
