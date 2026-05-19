@@ -11,6 +11,7 @@ Mean Variance Optimization and DJIA index.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 import matplotlib
 
 matplotlib.use("Agg")
@@ -28,6 +29,8 @@ from finrl.meta.preprocessor.yahoodownloader import YahooDownloader
 
 OUTPUT_DIR = "backtest_result"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+today_str = datetime.now().strftime("%m%d")
 
 # %% Part 1. Load data
 
@@ -139,18 +142,6 @@ covReturns = np.cov(arReturns, rowvar=False)
 np.set_printoptions(precision=3, suppress=True)
 print("Mean returns of assets in portfolio\n", meanReturns)
 
-# Save meanReturns to CSV
-mean_returns_df = pd.DataFrame(
-    {
-        "tic": StockData.columns,
-        "mean_return": meanReturns,
-    }
-)
-
-mean_returns_csv_path = os.path.join(OUTPUT_DIR, "meanReturns.csv")
-mean_returns_df.to_csv(mean_returns_csv_path, index=False)
-
-print(f"\nMean returns saved to {mean_returns_csv_path}")
 
 from pypfopt.efficient_frontier import EfficientFrontier
 
@@ -228,7 +219,7 @@ print("\n=== Backtest Results ===")
 print(result)
 
 # Save backtest results to CSV
-backtest_csv_path = os.path.join(OUTPUT_DIR, "backtest_results.csv")
+backtest_csv_path = os.path.join(OUTPUT_DIR, f"backtest_results_{today_str}.csv")
 result.to_csv(backtest_csv_path, index=True)
 
 print(f"\nBacktest results saved to {backtest_csv_path}")
@@ -242,7 +233,7 @@ plt.title("Portfolio Value Over Time")
 plt.xlabel("Date")
 plt.ylabel("Portfolio Value ($)")
 
-plot_path = os.path.join(OUTPUT_DIR, "backtest_result_v0.png")
+plot_path = os.path.join(OUTPUT_DIR, f"backtest_result_{today_str}.png")
 plt.savefig(plot_path, dpi=150, bbox_inches="tight")
 
 print(f"\nPlot saved to {plot_path}")
