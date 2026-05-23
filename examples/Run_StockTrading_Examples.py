@@ -19,7 +19,7 @@ REWARD_TYPE = "v1"
 REWARD_PARAMS = {
     "alpha": 0.05,
     "beta": 0.05,
-    "gamma": 1.0,
+    # "gamma": 1.0,
     "n_recent": 14,
 }
 

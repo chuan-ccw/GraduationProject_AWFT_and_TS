@@ -129,12 +129,12 @@ class StockTradingEnv(gym.Env):
                     sell_num_shares = min(
                         abs(action), self.state[index + self.stock_dim + 1]
                     )
+                    # update balance
                     sell_amount = (
                         self.state[index + 1]
                         * sell_num_shares
                         * (1 - self.sell_cost_pct[index])
                     )
-                    # update balance
                     self.state[0] += sell_amount
 
                     self.state[index + self.stock_dim + 1] -= sell_num_shares

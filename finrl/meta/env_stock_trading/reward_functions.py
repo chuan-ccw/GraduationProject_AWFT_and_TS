@@ -35,7 +35,7 @@ def reward_v1(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     Jason reward v1.
 
     reward = simple_return
-             - gamma * transaction_cost_rate
+             - gamma * transaction_cost_rate (已經扣除所以不用)
              + alpha * buy_low_score
              + beta  * sell_high_score
 
@@ -47,15 +47,15 @@ def reward_v1(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     eps = params.get("eps", 1e-8)
     alpha = params.get("alpha", 0.05)
     beta = params.get("beta", 0.05)
-    gamma = params.get("gamma", 1.0)
+    # gamma = params.get("gamma", 1.0)
     n_recent = params.get("n_recent", 14)
 
     simple_return = (ctx.end_total_asset - ctx.begin_total_asset) / (
         ctx.begin_total_asset + eps
     )
 
-    transaction_cost = ctx.env.cost - ctx.cost_before_trade
-    transaction_cost_rate = transaction_cost / (ctx.begin_total_asset + eps)
+    # transaction_cost = ctx.env.cost - ctx.cost_before_trade
+    # transaction_cost_rate = transaction_cost / (ctx.begin_total_asset + eps)
 
     buy_low_score_total = 0.0
     sell_high_score_total = 0.0
@@ -96,7 +96,7 @@ def reward_v1(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
 
     return (
         simple_return
-        - gamma * transaction_cost_rate
+        # - gamma * transaction_cost_rate
         + alpha * buy_low_score_total
         + beta * sell_high_score_total
     )
