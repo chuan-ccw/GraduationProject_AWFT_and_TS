@@ -6,6 +6,12 @@ TRAINED_MODEL_DIR = "trained_models"
 TENSORBOARD_LOG_DIR = "tensorboard_log"
 RESULTS_DIR = "results"
 
+# Default reward experiment settings
+# These are only defaults. Run_StockTrading_Examples.py can override them at runtime.
+REWARD_TYPE = "v0"
+REWARD_PARAMS = {"alpha": 0.05, "beta": 0.05, "gamma": 1.0, "n_recent": 14}
+EXPERIMENT_ROOT = r"C:\Users\User\Desktop\GraduationProject\Experence_result"
+
 # date format: '%Y-%m-%d'
 TRAIN_START_DATE = "2014-01-06"
 TRAIN_END_DATE = "2024-12-31"

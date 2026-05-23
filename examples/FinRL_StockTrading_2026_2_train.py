@@ -13,18 +13,27 @@ import pandas as pd
 from stable_baselines3.common.logger import configure
 
 from finrl.agents.stablebaselines3.models import DRLAgent
+from finrl import config
 from finrl.config import INDICATORS
-from finrl.config import RESULTS_DIR
-from finrl.config import TRAINED_MODEL_DIR
 from finrl.main import check_and_make_directories
 from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+from experiment_settings import env_bool, env_int, env_json, env_str
 
-REWARD_TYPE = "v0"  # choose: "v0" or "v1"
-REWARD_PARAMS = {"alpha": 0.05, "beta": 0.05, "gamma": 1.0, "n_recent": 14}
+# Runtime settings: Run_StockTrading_Examples.py can override config.py through environment variables.
+REWARD_TYPE = env_str("REWARD_TYPE", getattr(config, "REWARD_TYPE", "v0"))
+REWARD_PARAMS = env_json("REWARD_PARAMS", getattr(config, "REWARD_PARAMS", {}))
+RESULTS_DIR = env_str("RESULTS_DIR", config.RESULTS_DIR)
+TRAINED_MODEL_DIR = env_str("TRAINED_MODEL_DIR", config.TRAINED_MODEL_DIR)
+EXPERIMENT_DIR = env_str("EXPERIMENT_DIR", None)
+
+print("Train setting:")
+print(f"  REWARD_TYPE: {REWARD_TYPE}")
+print(f"  REWARD_PARAMS: {REWARD_PARAMS}")
+print(f"  EXPERIMENT_DIR: {EXPERIMENT_DIR}")
 
 # %% Part 1. Prepare directories
 
-check_and_make_directories([TRAINED_MODEL_DIR])
+check_and_make_directories([TRAINED_MODEL_DIR, RESULTS_DIR])
 
 # %% Part 2. Build environment
 
@@ -63,11 +72,17 @@ print(type(env_train))
 
 # %% Part 3. Train DRL Agents
 
-if_using_a2c = False
-if_using_ddpg = False
-if_using_ppo = True
-if_using_td3 = False
-if_using_sac = False
+if_using_a2c = env_bool("IF_USING_A2C", False)
+if_using_ddpg = env_bool("IF_USING_DDPG", False)
+if_using_ppo = env_bool("IF_USING_PPO", True)
+if_using_td3 = env_bool("IF_USING_TD3", False)
+if_using_sac = env_bool("IF_USING_SAC", False)
+
+A2C_TOTAL_TIMESTEPS = env_int("A2C_TOTAL_TIMESTEPS", 20000)
+DDPG_TOTAL_TIMESTEPS = env_int("DDPG_TOTAL_TIMESTEPS", 20000)
+PPO_TOTAL_TIMESTEPS = env_int("PPO_TOTAL_TIMESTEPS", 10000)
+TD3_TOTAL_TIMESTEPS = env_int("TD3_TOTAL_TIMESTEPS", 20000)
+SAC_TOTAL_TIMESTEPS = env_int("SAC_TOTAL_TIMESTEPS", 20000)
 
 # --- Agent 1: A2C ---
 agent = DRLAgent(env=env_train)
@@ -78,7 +93,7 @@ if if_using_a2c:
     model_a2c.set_logger(new_logger_a2c)
 
 trained_a2c = (
-    agent.train_model(model=model_a2c, tb_log_name="a2c", total_timesteps=20000)
+    agent.train_model(model=model_a2c, tb_log_name="a2c", total_timesteps=A2C_TOTAL_TIMESTEPS)
     if if_using_a2c
     else None
 )
@@ -94,7 +109,7 @@ if if_using_ddpg:
     model_ddpg.set_logger(new_logger_ddpg)
 
 trained_ddpg = (
-    agent.train_model(model=model_ddpg, tb_log_name="ddpg", total_timesteps=20000)
+    agent.train_model(model=model_ddpg, tb_log_name="ddpg", total_timesteps=DDPG_TOTAL_TIMESTEPS)
     if if_using_ddpg
     else None
 )
@@ -116,7 +131,7 @@ if if_using_ppo:
     model_ppo.set_logger(new_logger_ppo)
 
 trained_ppo = (
-    agent.train_model(model=model_ppo, tb_log_name="ppo", total_timesteps=10000)
+    agent.train_model(model=model_ppo, tb_log_name="ppo", total_timesteps=PPO_TOTAL_TIMESTEPS)
     if if_using_ppo
     else None
 )
@@ -137,7 +152,7 @@ if if_using_td3:
     model_td3.set_logger(new_logger_td3)
 
 trained_td3 = (
-    agent.train_model(model=model_td3, tb_log_name="td3", total_timesteps=20000)
+    agent.train_model(model=model_td3, tb_log_name="td3", total_timesteps=TD3_TOTAL_TIMESTEPS)
     if if_using_td3
     else None
 )
@@ -160,7 +175,7 @@ if if_using_sac:
     model_sac.set_logger(new_logger_sac)
 
 trained_sac = (
-    agent.train_model(model=model_sac, tb_log_name="sac", total_timesteps=20000)
+    agent.train_model(model=model_sac, tb_log_name="sac", total_timesteps=SAC_TOTAL_TIMESTEPS)
     if if_using_sac
     else None
 )

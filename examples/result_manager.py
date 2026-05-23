@@ -32,9 +32,9 @@ def make_experiment_dir(
     return out_dir
 
 
-def save_config(out_dir: str | Path, config: Mapping[str, Any]) -> None:
+def save_config(out_dir: str | Path, config: Mapping[str, Any], filename: str = "config.json") -> None:
     out_dir = Path(out_dir)
-    with open(out_dir / "config.json", "w", encoding="utf-8") as f:
+    with open(out_dir / filename, "w", encoding="utf-8") as f:
         json.dump(dict(config), f, indent=4, ensure_ascii=False, default=str)
 
 

@@ -17,13 +17,20 @@ from finrl import config_tickers
 import finrl.config as config
 print("config path:", config.__file__)
 from finrl.config import INDICATORS
-from finrl.config import TRADE_END_DATE
-from finrl.config import TRADE_START_DATE
-from finrl.config import TRAIN_END_DATE
-from finrl.config import TRAIN_START_DATE
+from experiment_settings import env_str
 from finrl.meta.preprocessor.preprocessors import data_split
 from finrl.meta.preprocessor.preprocessors import FeatureEngineer
 from finrl.meta.preprocessor.yahoodownloader import YahooDownloader
+
+# Runtime settings: Run_StockTrading_Examples.py can override config.py through environment variables.
+TRAIN_START_DATE = env_str("TRAIN_START_DATE", config.TRAIN_START_DATE)
+TRAIN_END_DATE = env_str("TRAIN_END_DATE", config.TRAIN_END_DATE)
+TRADE_START_DATE = env_str("TRADE_START_DATE", config.TRADE_START_DATE)
+TRADE_END_DATE = env_str("TRADE_END_DATE", config.TRADE_END_DATE)
+
+print("Data date setting:")
+print(f"  TRAIN: {TRAIN_START_DATE} to {TRAIN_END_DATE}")
+print(f"  TRADE: {TRADE_START_DATE} to {TRADE_END_DATE}")
 
 # # %% Part 1. Fetch data - Single ticker
 

@@ -21,23 +21,39 @@ import pandas as pd
 from stable_baselines3 import A2C, DDPG, PPO, SAC, TD3
 
 from finrl.agents.stablebaselines3.models import DRLAgent
-from finrl.config import INDICATORS, TRAINED_MODEL_DIR, TRADE_START_DATE, TRADE_END_DATE
+from finrl import config
+from finrl.config import INDICATORS
 from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
 from finrl.meta.preprocessor.yahoodownloader import YahooDownloader
 from result_manager import make_experiment_dir, save_config
+from experiment_settings import env_bool, env_json, env_str
 
-REWARD_TYPE = "v0"  # choose: "v0" or "v1"
-REWARD_PARAMS = {"alpha": 0.05, "beta": 0.05, "gamma": 1.0, "n_recent": 14}
-EXPERIMENT_BASE_DIR = r"C:\Users\User\Desktop\GraduationProject\Experence_result"
+# Runtime settings: Run_StockTrading_Examples.py can override config.py through environment variables.
+REWARD_TYPE = env_str("REWARD_TYPE", getattr(config, "REWARD_TYPE", "v0"))
+REWARD_PARAMS = env_json("REWARD_PARAMS", getattr(config, "REWARD_PARAMS", {}))
+TRAINED_MODEL_DIR = env_str("TRAINED_MODEL_DIR", config.TRAINED_MODEL_DIR)
+TRADE_START_DATE = env_str("TRADE_START_DATE", config.TRADE_START_DATE)
+TRADE_END_DATE = env_str("TRADE_END_DATE", config.TRADE_END_DATE)
+EXPERIMENT_BASE_DIR = env_str("EXPERIMENT_ROOT", getattr(config, "EXPERIMENT_ROOT", r"C:\Users\User\Desktop\GraduationProject\Experence_result"))
+EXPERIMENT_DIR = env_str("EXPERIMENT_DIR", None)
 
 # %% Part 0. Create output folder
 
-OUTPUT_DIR = make_experiment_dir(
-    base_dir=EXPERIMENT_BASE_DIR,
-    reward_type=REWARD_TYPE,
-    trade_start_date=TRADE_START_DATE,
-    trade_end_date=TRADE_END_DATE,
-)
+if EXPERIMENT_DIR:
+    OUTPUT_DIR = os.path.abspath(EXPERIMENT_DIR)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+else:
+    OUTPUT_DIR = make_experiment_dir(
+        base_dir=EXPERIMENT_BASE_DIR,
+        reward_type=REWARD_TYPE,
+        trade_start_date=TRADE_START_DATE,
+        trade_end_date=TRADE_END_DATE,
+    )
+
+print("Backtest setting:")
+print(f"  REWARD_TYPE: {REWARD_TYPE}")
+print(f"  REWARD_PARAMS: {REWARD_PARAMS}")
+print(f"  OUTPUT_DIR: {OUTPUT_DIR}")
 
 save_config(
     OUTPUT_DIR,
@@ -47,6 +63,7 @@ save_config(
         "trade_start_date": TRADE_START_DATE,
         "trade_end_date": TRADE_END_DATE,
         "indicators": INDICATORS,
+        "trained_model_dir": TRAINED_MODEL_DIR,
     },
 )
 
@@ -64,11 +81,11 @@ trade.index.names = [""]
 
 # %% Part 2. Load trained agents
 
-if_using_a2c = False
-if_using_ddpg = False
-if_using_ppo = True
-if_using_td3 = False
-if_using_sac = False
+if_using_a2c = env_bool("IF_USING_A2C", False)
+if_using_ddpg = env_bool("IF_USING_DDPG", False)
+if_using_ppo = env_bool("IF_USING_PPO", True)
+if_using_td3 = env_bool("IF_USING_TD3", False)
+if_using_sac = env_bool("IF_USING_SAC", False)
 
 trained_a2c = A2C.load(TRAINED_MODEL_DIR + "/agent_a2c") if if_using_a2c else None
 trained_ddpg = DDPG.load(TRAINED_MODEL_DIR + "/agent_ddpg") if if_using_ddpg else None
