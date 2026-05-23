@@ -11,6 +11,8 @@ from gymnasium import spaces
 from gymnasium.utils import seeding
 from stable_baselines3.common.vec_env import DummyVecEnv
 
+from finrl.meta.env_stock_trading.reward_functions import RewardContext, calculate_reward
+
 matplotlib.use("Agg")
 
 # from stable_baselines3.common.logger import Logger, KVWriter, CSVOutputFormat
@@ -52,6 +54,8 @@ class StockTradingEnv(gym.Env):
         day=0,
         initial=True,
         previous_state=[],
+        reward_type="v0",
+        reward_params=None,
         model_name="",
         mode="",
         iteration="",
@@ -65,6 +69,8 @@ class StockTradingEnv(gym.Env):
         self.buy_cost_pct = buy_cost_pct
         self.sell_cost_pct = sell_cost_pct
         self.reward_scaling = reward_scaling
+        self.reward_type = reward_type
+        self.reward_params = reward_params or {}
         self.state_space = state_space
         self.action_space = action_space
         self.tech_indicator_list = tech_indicator_list
@@ -324,6 +330,34 @@ class StockTradingEnv(gym.Env):
             )
             # print("begin_total_asset:{}".format(begin_total_asset))
 
+            # ==============================
+            # Custom Reward Preparation
+            # ==============================
+
+            # 記錄交易前的累積交易成本
+            cost_before_trade = self.cost
+
+            # 保留原始 action 正負號
+            # 因為後面 _sell_stock 後，sell action 會被轉成正數
+            raw_actions = actions.copy()
+
+            # 記錄交易發生前的股價
+            current_prices_before_trade = np.array(
+                self.state[1 : (self.stock_dim + 1)]
+            )
+
+            # 最近 n 天高低點，之後可以改成 14 / 20 / 60 做實驗
+            n_recent = 14
+
+            # 記錄交易發生的當下是第幾天
+            current_day = self.day
+
+            # 記錄股票順序
+            if self.stock_dim == 1:
+                tic_list = [self.data.tic]
+            else:
+                tic_list = self.data.tic.values
+
             argsort_actions = np.argsort(actions)
             sell_index = argsort_actions[: np.where(actions < 0)[0].shape[0]]
             buy_index = argsort_actions[::-1][: np.where(actions > 0)[0].shape[0]]
@@ -357,9 +391,34 @@ class StockTradingEnv(gym.Env):
             )
             self.asset_memory.append(end_total_asset)
             self.date_memory.append(self._get_date())
-            self.reward = end_total_asset - begin_total_asset
+
+
+            # ==============================
+            # Reward Function Dispatch
+            # ==============================
+            reward_context = RewardContext(
+                env=self,
+                begin_total_asset=begin_total_asset,
+                end_total_asset=end_total_asset,
+                raw_actions=raw_actions,
+                current_prices_before_trade=current_prices_before_trade,
+                cost_before_trade=cost_before_trade,
+                current_day=current_day,
+                tic_list=tic_list,
+            )
+
+            self.reward = calculate_reward(
+                reward_type=self.reward_type,
+                ctx=reward_context,
+                params=self.reward_params,
+            )
+
+            # Store unscaled reward for observation/debugging.
             self.rewards_memory.append(self.reward)
+
+            # Keep FinRL's original scaling flow.
             self.reward = self.reward * self.reward_scaling
+
             self.state_memory.append(
                 self.state
             )  # add current state in state_recorder for each step

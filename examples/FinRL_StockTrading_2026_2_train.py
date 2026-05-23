@@ -19,6 +19,9 @@ from finrl.config import TRAINED_MODEL_DIR
 from finrl.main import check_and_make_directories
 from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
 
+REWARD_TYPE = "v0"  # choose: "v0" or "v1"
+REWARD_PARAMS = {"alpha": 0.05, "beta": 0.05, "gamma": 1.0, "n_recent": 14}
+
 # %% Part 1. Prepare directories
 
 check_and_make_directories([TRAINED_MODEL_DIR])
@@ -49,7 +52,12 @@ env_kwargs = {
     "reward_scaling": 1e-4,
 }
 
-e_train_gym = StockTradingEnv(df=train, **env_kwargs)
+e_train_gym = StockTradingEnv(
+    df=train,
+    reward_type=REWARD_TYPE,
+    reward_params=REWARD_PARAMS,
+    **env_kwargs,
+)
 env_train, _ = e_train_gym.get_sb_env()
 print(type(env_train))
 

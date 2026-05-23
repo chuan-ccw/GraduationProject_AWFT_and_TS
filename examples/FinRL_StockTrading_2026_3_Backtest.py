@@ -24,11 +24,31 @@ from finrl.agents.stablebaselines3.models import DRLAgent
 from finrl.config import INDICATORS, TRAINED_MODEL_DIR, TRADE_START_DATE, TRADE_END_DATE
 from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
 from finrl.meta.preprocessor.yahoodownloader import YahooDownloader
+from result_manager import make_experiment_dir, save_config
+
+REWARD_TYPE = "v0"  # choose: "v0" or "v1"
+REWARD_PARAMS = {"alpha": 0.05, "beta": 0.05, "gamma": 1.0, "n_recent": 14}
+EXPERIMENT_BASE_DIR = r"C:\Users\User\Desktop\GraduationProject\Experence_result"
 
 # %% Part 0. Create output folder
 
-OUTPUT_DIR = "backtest_result"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+OUTPUT_DIR = make_experiment_dir(
+    base_dir=EXPERIMENT_BASE_DIR,
+    reward_type=REWARD_TYPE,
+    trade_start_date=TRADE_START_DATE,
+    trade_end_date=TRADE_END_DATE,
+)
+
+save_config(
+    OUTPUT_DIR,
+    {
+        "reward_type": REWARD_TYPE,
+        "reward_params": REWARD_PARAMS,
+        "trade_start_date": TRADE_START_DATE,
+        "trade_end_date": TRADE_END_DATE,
+        "indicators": INDICATORS,
+    },
+)
 
 today_str = datetime.now().strftime("%m%d")
 
@@ -79,7 +99,12 @@ env_kwargs = {
 }
 
 e_trade_gym = StockTradingEnv(
-    df=trade, turbulence_threshold=70, risk_indicator_col="vix", **env_kwargs
+    df=trade,
+    turbulence_threshold=70,
+    risk_indicator_col="vix",
+    reward_type=REWARD_TYPE,
+    reward_params=REWARD_PARAMS,
+    **env_kwargs
 )
 
 df_account_value_a2c, df_actions_a2c = (
@@ -219,7 +244,7 @@ print("\n=== Backtest Results ===")
 print(result)
 
 # Save backtest results to CSV
-backtest_csv_path = os.path.join(OUTPUT_DIR, f"backtest_result_v0_{TRADE_START_DATE}_to_{TRADE_END_DATE}_{today_str}.csv")
+backtest_csv_path = os.path.join(OUTPUT_DIR, f"backtest_result_{REWARD_TYPE}_{TRADE_START_DATE}_to_{TRADE_END_DATE}_{today_str}.csv")
 result.to_csv(backtest_csv_path, index=True)
 
 print(f"\nBacktest results saved to {backtest_csv_path}")
@@ -233,7 +258,7 @@ plt.title("Portfolio Value Over Time")
 plt.xlabel("Date")
 plt.ylabel("Portfolio Value ($)")
 
-plot_path = os.path.join(OUTPUT_DIR, f"backtest_result_v0_{TRADE_START_DATE}_to_{TRADE_END_DATE}_{today_str}.png")
+plot_path = os.path.join(OUTPUT_DIR, f"backtest_result_{REWARD_TYPE}_{TRADE_START_DATE}_to_{TRADE_END_DATE}_{today_str}.png")
 plt.savefig(plot_path, dpi=150, bbox_inches="tight")
 
 print(f"\nPlot saved to {plot_path}")
