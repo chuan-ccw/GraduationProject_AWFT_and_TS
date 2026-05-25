@@ -9,6 +9,7 @@ Introduce how to use FinRL to fetch and process data that we need for ML/RL trad
 from __future__ import annotations
 
 import itertools
+from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
@@ -27,10 +28,16 @@ TRAIN_START_DATE = env_str("TRAIN_START_DATE", config.TRAIN_START_DATE)
 TRAIN_END_DATE = env_str("TRAIN_END_DATE", config.TRAIN_END_DATE)
 TRADE_START_DATE = env_str("TRADE_START_DATE", config.TRADE_START_DATE)
 TRADE_END_DATE = env_str("TRADE_END_DATE", config.TRADE_END_DATE)
+TRAIN_DATA_PATH = Path(env_str("TRAIN_DATA_PATH", "train_data.csv"))
+TRADE_DATA_PATH = Path(env_str("TRADE_DATA_PATH", "trade_data.csv"))
+TRAIN_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+TRADE_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 print("Data date setting:")
 print(f"  TRAIN: {TRAIN_START_DATE} to {TRAIN_END_DATE}")
 print(f"  TRADE: {TRADE_START_DATE} to {TRADE_END_DATE}")
+print(f"  TRAIN_DATA_PATH: {TRAIN_DATA_PATH}")
+print(f"  TRADE_DATA_PATH: {TRADE_DATA_PATH}")
 
 # # %% Part 1. Fetch data - Single ticker
 
@@ -98,6 +105,11 @@ trade = data_split(processed_full, TRADE_START_DATE, TRADE_END_DATE)
 print(f"\nTrain data length: {len(train)}")
 print(f"Trade data length: {len(trade)}")
 
-train.to_csv("train_data.csv")
-trade.to_csv("trade_data.csv")
-print("Data saved to train_data.csv and trade_data.csv")
+train.to_csv(TRAIN_DATA_PATH)
+trade.to_csv(TRADE_DATA_PATH)
+# Also save to project root for backward compatibility when running scripts manually.
+if str(TRAIN_DATA_PATH) != "train_data.csv":
+    train.to_csv("train_data.csv")
+if str(TRADE_DATA_PATH) != "trade_data.csv":
+    trade.to_csv("trade_data.csv")
+print(f"Data saved to {TRAIN_DATA_PATH} and {TRADE_DATA_PATH}")

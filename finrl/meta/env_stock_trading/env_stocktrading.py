@@ -111,6 +111,7 @@ class StockTradingEnv(gym.Env):
         self.state_memory = (
             []
         )  # we need sometimes to preserve the state in the middle of trading process
+        self.holdings_memory = [self._get_holdings_snapshot()]
         self.date_memory = [self._get_date()]
         #         self.logger = Logger('results',[CSVOutputFormat])
         # self.reset()
@@ -422,6 +423,7 @@ class StockTradingEnv(gym.Env):
             self.state_memory.append(
                 self.state
             )  # add current state in state_recorder for each step
+            self.holdings_memory.append(self._get_holdings_snapshot())
 
         return self.state, self.reward, self.terminal, False, {}
 
@@ -460,6 +462,8 @@ class StockTradingEnv(gym.Env):
         # self.iteration=self.iteration
         self.rewards_memory = []
         self.actions_memory = []
+        self.state_memory = []
+        self.holdings_memory = [self._get_holdings_snapshot()]
         self.date_memory = [self._get_date()]
 
         self.episode += 1
@@ -557,6 +561,34 @@ class StockTradingEnv(gym.Env):
         else:
             date = self.data.date
         return date
+
+
+    def _get_tic_list(self):
+        if len(self.df.tic.unique()) > 1:
+            return list(self.data.tic.values)
+        return [self.data.tic]
+
+    def _get_holdings_snapshot(self):
+        cash = float(self.state[0])
+        shares = list(self.state[(self.stock_dim + 1) : (self.stock_dim * 2 + 1)])
+        return [cash] + [float(x) for x in shares]
+
+    def save_holdings_memory(self):
+        columns = ["cash"] + self._get_tic_list()
+        df_holdings = pd.DataFrame(self.holdings_memory, columns=columns)
+        df_holdings.insert(0, "date", self.date_memory[: len(df_holdings)])
+        return df_holdings
+
+    def save_reward_memory(self):
+        # rewards_memory stores unscaled rewards before reward_scaling.
+        date_list = self.date_memory[1 : 1 + len(self.rewards_memory)]
+        return pd.DataFrame(
+            {
+                "date": date_list,
+                "step_reward_unscaled": self.rewards_memory,
+                "cumulative_reward_unscaled": np.cumsum(self.rewards_memory),
+            }
+        )
 
     # add save_state_memory to preserve state in the trading process
     def save_state_memory(self):
