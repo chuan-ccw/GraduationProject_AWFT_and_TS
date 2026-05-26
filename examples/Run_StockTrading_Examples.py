@@ -35,7 +35,7 @@ SHIFT_YEARS = 1
 
 # 每個 rolling window 重複實驗次數
 # 注意：repeat_01 在 window_01 ~ window_05 使用相同 seed；repeat_02 才換下一個 seed。
-REPEAT_EXPERIMENTS = 5
+REPEAT_EXPERIMENTS = 1
 BASE_RANDOM_SEED = 42
 
 # 非 rolling mode 才會用到這組日期

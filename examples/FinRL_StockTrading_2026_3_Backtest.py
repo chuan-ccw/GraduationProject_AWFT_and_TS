@@ -197,15 +197,11 @@ def save_agent_diagnostics(
 
 
 def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: str) -> None:
-    """Plot cash and stock holdings using two independent, readable color scales.
+    """Plot cash and stock holdings using two independent heatmaps and right-side colorbars.
 
-    Cash is a dollar amount, while stock holdings are share counts.
-    They must not share one color scale; otherwise cash dominates the visualization.
-    Layout:
-      - top thin band: cash balance
-      - middle horizontal colorbar: cash scale
-      - bottom block: stock share holdings
-      - right vertical colorbar: stock share scale
+    Cash is a dollar amount, while stock holdings are share counts, so they must use
+    separate color scales. To keep the layout consistent with the reference image,
+    both colorbars are placed on the right side as vertical bars.
     """
     if holdings.empty:
         return
@@ -232,43 +228,52 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
             return f"{x / 1_000:.0f}K"
         return f"{x:.0f}"
 
-    fig_height = max(8, 0.23 * max(len(stocks), 1) + 2.8)
+    stock_rows = max(len(stocks), 1)
+    fig_height = max(8, 0.23 * stock_rows + 2.8)
     fig = plt.figure(figsize=(18, fig_height), constrained_layout=True)
     gs = fig.add_gridspec(
-        nrows=3,
+        nrows=2,
         ncols=2,
-        height_ratios=[0.55, 0.22, max(5.5, 0.23 * max(len(stocks), 1))],
-        width_ratios=[40, 1.0],
+        height_ratios=[0.9, max(5.5, 0.23 * stock_rows)],
+        width_ratios=[40, 0.9],
         hspace=0.08,
-        wspace=0.03,
+        wspace=0.06,
     )
 
     ax_cash = fig.add_subplot(gs[0, 0])
-    cax_cash = fig.add_subplot(gs[1, 0])
-    ax_stock = fig.add_subplot(gs[2, 0], sharex=ax_cash)
-    cax_stock = fig.add_subplot(gs[2, 1])
-    fig.add_subplot(gs[0, 1]).axis("off")
-    fig.add_subplot(gs[1, 1]).axis("off")
+    cax_cash = fig.add_subplot(gs[0, 1])
+    ax_stock = fig.add_subplot(gs[1, 0], sharex=ax_cash)
+    cax_stock = fig.add_subplot(gs[1, 1])
 
     if not cash.empty:
-        cash_img = ax_cash.imshow(cash.values, aspect="auto", interpolation="nearest", cmap="YlOrBr")
+        cash_img = ax_cash.imshow(
+            cash.values,
+            aspect="auto",
+            interpolation="nearest",
+            cmap="YlOrBr",
+        )
         ax_cash.set_yticks([0])
         ax_cash.set_yticklabels(["cash"])
         ax_cash.set_ylabel("Cash", labelpad=12)
-        cbar_cash = fig.colorbar(cash_img, cax=cax_cash, orientation="horizontal")
-        cbar_cash.set_label("Cash balance", labelpad=4)
-        cbar_cash.ax.xaxis.set_major_formatter(FuncFormatter(money_formatter))
-        cbar_cash.ax.tick_params(labelsize=9, pad=2)
+        cbar_cash = fig.colorbar(cash_img, cax=cax_cash, orientation="vertical")
+        cbar_cash.set_label("Cash balance", labelpad=10)
+        cbar_cash.ax.yaxis.set_major_formatter(FuncFormatter(money_formatter))
+        cbar_cash.ax.tick_params(labelsize=9)
     else:
         ax_cash.axis("off")
         cax_cash.axis("off")
 
     if not stocks.empty:
-        stock_img = ax_stock.imshow(stocks.values, aspect="auto", interpolation="nearest", cmap="Blues")
+        stock_img = ax_stock.imshow(
+            stocks.values,
+            aspect="auto",
+            interpolation="nearest",
+            cmap="Blues",
+        )
         ax_stock.set_yticks(np.arange(len(stocks.index)))
         ax_stock.set_yticklabels(stocks.index)
         ax_stock.set_ylabel("Stocks")
-        cbar_stock = fig.colorbar(stock_img, cax=cax_stock)
+        cbar_stock = fig.colorbar(stock_img, cax=cax_stock, orientation="vertical")
         cbar_stock.set_label("Number of shares", labelpad=10)
         cbar_stock.ax.yaxis.set_major_locator(MaxNLocator(nbins=7, integer=True))
         cbar_stock.ax.tick_params(labelsize=9)
