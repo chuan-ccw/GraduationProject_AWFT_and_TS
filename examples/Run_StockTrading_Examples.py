@@ -4,6 +4,12 @@ import json
 import os
 import subprocess
 import sys
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,7 +22,7 @@ from finrl import config
 # =====================================================
 
 # Reward 選擇："v0" = FinRL 原版 reward；"v1" = 我們設計的 reward
-REWARD_TYPE = "v0"
+REWARD_TYPE = "vㄢ"
 REWARD_PARAMS = {
     "alpha": 0.05,
     "beta": 0.05,
@@ -35,7 +41,7 @@ SHIFT_YEARS = 1
 
 # 每個 rolling window 重複實驗次數
 # 注意：repeat_01 在 window_01 ~ window_05 使用相同 seed；repeat_02 才換下一個 seed。
-REPEAT_EXPERIMENTS = 1
+REPEAT_EXPERIMENTS = 5
 BASE_RANDOM_SEED = 42
 
 # 非 rolling mode 才會用到這組日期
@@ -340,6 +346,138 @@ def write_rolling_summaries(rolling_root: Path, summary_rows: list[dict[str, Any
     print(f"Rolling summary saved to: {summary_path}")
 
 
+def _read_backtest_csv(csv_path: Path) -> pd.DataFrame | None:
+    try:
+        df = pd.read_csv(csv_path)
+        if df.empty:
+            return None
+        first_col = df.columns[0]
+        if first_col != "date":
+            df = df.rename(columns={first_col: "date"})
+        df["date"] = df["date"].astype(str)
+        return df
+    except Exception as exc:
+        print(f"讀取 backtest csv 失敗: {csv_path} -> {exc}")
+        return None
+
+
+def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
+    """For one rolling window, aggregate repeated backtest results across seeds.
+
+    Output:
+      1. CSV containing ppo mean/min/max and mean mvo/dji
+      2. PNG where PPO is a blue mean line with a light blue min-max band
+    """
+    repeat_dirs = sorted([p for p in window_dir.iterdir() if p.is_dir() and p.name.startswith("repeat_")])
+    if not repeat_dirs:
+        return
+
+    run_dfs: list[pd.DataFrame] = []
+    trade_start_date = None
+    trade_end_date = None
+    date_suffix = datetime.now().strftime("%m%d")
+
+    for repeat_dir in repeat_dirs:
+        candidates = sorted(repeat_dir.glob("backtest_result_*.csv"))
+        if not candidates:
+            continue
+        csv_path = candidates[0]
+        df = _read_backtest_csv(csv_path)
+        if df is None or "ppo" not in df.columns:
+            continue
+
+        if trade_start_date is None or trade_end_date is None:
+            name = csv_path.stem  # backtest_result_v0_2021-01-01_to_2021-12-31_0526
+            prefix = f"backtest_result_{reward_type}_"
+            if name.startswith(prefix):
+                tail = name[len(prefix):]
+                if "_to_" in tail:
+                    try:
+                        left, right = tail.rsplit("_", 1)
+                        start_str, end_str = left.split("_to_")
+                        trade_start_date = start_str
+                        trade_end_date = end_str
+                        date_suffix = right
+                    except Exception:
+                        pass
+
+        keep_cols = [c for c in ["date", "ppo", "mvo", "dji"] if c in df.columns]
+        run_dfs.append(df[keep_cols].copy())
+
+    if not run_dfs:
+        print(f"{window_dir} 沒有可用的 backtest_result csv，略過 aggregate plot。")
+        return
+
+    base_dates = run_dfs[0]["date"].astype(str)
+    ppo_runs = []
+    mvo_runs = []
+    dji_runs = []
+
+    for run_idx, df in enumerate(run_dfs, start=1):
+        aligned = df.set_index("date").reindex(base_dates).reset_index()
+        if "ppo" in aligned.columns:
+            ppo_runs.append(pd.to_numeric(aligned["ppo"], errors="coerce").rename(f"ppo_run_{run_idx:02d}"))
+        if "mvo" in aligned.columns:
+            mvo_runs.append(pd.to_numeric(aligned["mvo"], errors="coerce").rename(f"mvo_run_{run_idx:02d}"))
+        if "dji" in aligned.columns:
+            dji_runs.append(pd.to_numeric(aligned["dji"], errors="coerce").rename(f"dji_run_{run_idx:02d}"))
+
+    ppo_df = pd.concat(ppo_runs, axis=1) if ppo_runs else pd.DataFrame(index=range(len(base_dates)))
+    mvo_df = pd.concat(mvo_runs, axis=1) if mvo_runs else pd.DataFrame(index=range(len(base_dates)))
+    dji_df = pd.concat(dji_runs, axis=1) if dji_runs else pd.DataFrame(index=range(len(base_dates)))
+
+    aggregate_df = pd.DataFrame({"date": base_dates})
+    if not ppo_df.empty:
+        aggregate_df["ppo_mean"] = ppo_df.mean(axis=1)
+        aggregate_df["ppo_min"] = ppo_df.min(axis=1)
+        aggregate_df["ppo_max"] = ppo_df.max(axis=1)
+    if not mvo_df.empty:
+        aggregate_df["mvo_mean"] = mvo_df.mean(axis=1)
+    if not dji_df.empty:
+        aggregate_df["dji_mean"] = dji_df.mean(axis=1)
+
+    trade_start_date = trade_start_date or str(base_dates.iloc[0])
+    trade_end_date = trade_end_date or str(base_dates.iloc[-1])
+
+    aggregate_csv_path = window_dir / f"backtest_result_repeat_mean_{reward_type}_{trade_start_date}_to_{trade_end_date}_{date_suffix}.csv"
+    aggregate_df.to_csv(aggregate_csv_path, index=False, encoding="utf-8-sig")
+
+    plt.rcParams["figure.figsize"] = (15, 5)
+    fig, ax = plt.subplots()
+    x = np.arange(len(aggregate_df))
+
+    if {"ppo_mean", "ppo_min", "ppo_max"}.issubset(aggregate_df.columns):
+        ppo_mean = pd.to_numeric(aggregate_df["ppo_mean"], errors="coerce")
+        ppo_min = pd.to_numeric(aggregate_df["ppo_min"], errors="coerce")
+        ppo_max = pd.to_numeric(aggregate_df["ppo_max"], errors="coerce")
+        ax.fill_between(x, ppo_min, ppo_max, color="blue", alpha=0.18, label="ppo range (min-max)")
+        ax.plot(x, ppo_mean, color="blue", linewidth=2.2, label="ppo mean")
+
+    if "mvo_mean" in aggregate_df.columns:
+        ax.plot(x, aggregate_df["mvo_mean"], color="tab:orange", label="mvo")
+    if "dji_mean" in aggregate_df.columns:
+        ax.plot(x, aggregate_df["dji_mean"], color="tab:green", label="dji")
+
+    max_xticks = 12
+    if len(aggregate_df) > 0:
+        tick_positions = np.linspace(0, len(aggregate_df) - 1, min(max_xticks, len(aggregate_df))).astype(int)
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels([aggregate_df["date"].iloc[i] for i in tick_positions])
+
+    ax.set_title("Portfolio Value Over Time")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Portfolio Value ($)")
+    ax.legend()
+    plt.xticks(rotation=0)
+    plt.tight_layout()
+
+    aggregate_plot_path = window_dir / f"backtest_result_repeat_mean_{reward_type}_{trade_start_date}_to_{trade_end_date}_{date_suffix}.png"
+    plt.savefig(aggregate_plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Window aggregate csv saved to: {aggregate_csv_path}")
+    print(f"Window aggregate plot saved to: {aggregate_plot_path}")
+
+
 # =====================================================
 # 5. Main
 # =====================================================
@@ -440,6 +578,10 @@ if __name__ == "__main__":
                     }
                 )
                 write_rolling_summaries(rolling_root, summary_rows)
+
+        for window in windows:
+            window_dir = rolling_root / window_folder_name(window)
+            plot_window_repeat_aggregate(window_dir, REWARD_TYPE)
 
         print("🎉 Rolling Window 重複實驗全部執行完畢！")
         print(f"結果總資料夾：{rolling_root}")
