@@ -65,39 +65,124 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 today_str = datetime.now().strftime("%m%d")
 
 
-def plot_train_reward_curve(rewards: pd.DataFrame, out_path: Path, agent_name: str) -> None:
-    if rewards.empty:
-        print(f"No train reward data to plot for {agent_name}.")
+def _first_existing_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    """Return the first column that exists in df."""
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
+def save_sb3_training_reward_curve(agent_name: str) -> None:
+    """Save the correct training reward curve for convergence analysis.
+
+    Correct interpretation:
+      x-axis = SB3 training timesteps, not market dates.
+      y-axis = rollout/ep_rew_mean when available.
+
+    This curve comes from Stable-Baselines3 progress.csv, so it reflects reward
+    during the learning process and is suitable for checking convergence.
+    """
+    progress_path = Path(RESULTS_DIR) / agent_name / "progress.csv"
+    if not progress_path.exists():
+        print(f"No SB3 progress.csv found for {agent_name}: {progress_path}")
         return
 
-    plt.figure(figsize=(15, 5))
-    x = rewards["date"].astype(str) if "date" in rewards.columns else np.arange(len(rewards))
-    y = rewards["cumulative_reward_unscaled"]
-    plt.plot(x, y)
+    progress = pd.read_csv(progress_path)
+    if progress.empty:
+        print(f"SB3 progress.csv is empty for {agent_name}: {progress_path}")
+        return
 
-    max_xticks = 12
-    if len(rewards) > 0:
-        tick_positions = np.linspace(0, len(rewards) - 1, min(max_xticks, len(rewards))).astype(int)
-        if hasattr(x, "iloc"):
-            tick_labels = [str(x.iloc[i]) for i in tick_positions]
-        else:
-            tick_labels = [str(x[i]) for i in tick_positions]
-        plt.xticks(tick_positions, tick_labels, rotation=45, ha="right")
+    step_col = _first_existing_column(
+        progress,
+        ["time/total_timesteps", "total_timesteps", "time/iterations"],
+    )
+    reward_col = _first_existing_column(
+        progress,
+        ["rollout/ep_rew_mean", "ep_rew_mean", "train/reward", "rollout/episode_reward"],
+    )
 
-    plt.title(f"Training Cumulative Reward Curve - {agent_name.upper()} ({REWARD_TYPE})")
-    plt.xlabel("Training date")
-    plt.ylabel("Cumulative reward, unscaled")
+    if step_col is None or reward_col is None:
+        print("Cannot plot convergence reward curve because required columns are missing.")
+        print(f"progress.csv columns = {list(progress.columns)}")
+        return
+
+    curve = progress[[step_col, reward_col]].copy()
+    curve = curve.rename(columns={step_col: "training_step", reward_col: "episode_reward_mean"})
+    curve["training_step"] = pd.to_numeric(curve["training_step"], errors="coerce")
+    curve["episode_reward_mean"] = pd.to_numeric(curve["episode_reward_mean"], errors="coerce")
+    curve = curve.dropna(subset=["training_step", "episode_reward_mean"]).reset_index(drop=True)
+
+    if curve.empty:
+        print(f"No numeric reward data available in {progress_path}")
+        return
+
+    # Smooth only for visualization. Keep the original reward column in the CSV.
+    smooth_window = min(10, max(1, len(curve) // 5))
+    curve["episode_reward_mean_smooth"] = (
+        curve["episode_reward_mean"].rolling(window=smooth_window, min_periods=1).mean()
+    )
+
+    suffix = f"{agent_name}_{REWARD_TYPE}_seed_{RANDOM_SEED}_{today_str}"
+    csv_path = OUTPUT_DIR / f"training_reward_curve_{suffix}.csv"
+    png_path = OUTPUT_DIR / f"training_reward_curve_{suffix}.png"
+    curve.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    fig, ax = plt.subplots(figsize=(15, 5))
+    ax.plot(curve["training_step"], curve["episode_reward_mean"], alpha=0.35, label="Episode reward mean")
+    ax.plot(curve["training_step"], curve["episode_reward_mean_smooth"], linewidth=2.2, label=f"Smoothed mean (window={smooth_window})")
+    ax.set_title(f"Training Reward Convergence Curve - {agent_name.upper()} ({REWARD_TYPE})")
+    ax.set_xlabel("Training timestep")
+    ax.set_ylabel("Mean episode reward")
+    ax.grid(True, alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(png_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"SB3 training reward curve saved to {csv_path}")
+    print(f"SB3 training reward plot saved to {png_path}")
+
+
+def plot_train_eval_reward_curve(rewards, plot_path, agent_name):
+    plot_df = pd.DataFrame(rewards)
+
+    # 避免 env_step 重複插入造成：
+    # ValueError: cannot insert env_step, already exists
+    if "env_step" not in plot_df.columns:
+        plot_df.insert(0, "env_step", np.arange(1, len(plot_df) + 1))
+
+    if "reward" in plot_df.columns:
+        reward_col = "reward"
+    elif "cumulative_reward" in plot_df.columns:
+        reward_col = "cumulative_reward"
+    else:
+        numeric_cols = plot_df.select_dtypes(include=[np.number]).columns.tolist()
+        numeric_cols = [c for c in numeric_cols if c != "env_step"]
+        reward_col = numeric_cols[0]
+
+    plot_df["cumulative_reward"] = plot_df[reward_col].cumsum()
+
+    csv_path = Path(plot_path).with_suffix(".csv")
+    plot_df.to_csv(csv_path, index=False)
+
+    plt.figure(figsize=(14, 5))
+    plt.plot(plot_df["env_step"], plot_df["cumulative_reward"], linewidth=1.8)
+    plt.title(f"Train Evaluation Cumulative Reward by Environment Step - {agent_name.upper()}")
+    plt.xlabel("Environment Step")
+    plt.ylabel("Cumulative Reward")
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.savefig(plot_path, dpi=300)
     plt.close()
 
 
 def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
-    """Run the trained model once on the training window and save its reward curve.
+    """Run the trained model once on the training window and save evaluation reward.
 
-    The reward curve belongs to the training window, not the trade/backtest window.
-    This function creates a fresh training environment so the saved curve covers
-    the full training period instead of whatever partial episode SB3 last used.
+    Important: this is only a deterministic evaluation over the train window.
+    To check convergence, use save_sb3_training_reward_curve(), which reads
+    Stable-Baselines3 progress.csv and uses training timesteps on the x-axis.
     """
     if model is None:
         return
@@ -119,19 +204,21 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
             break
 
     rewards = vec_env.env_method(method_name="save_reward_memory")[0]
+    rewards = rewards.copy()
+    rewards.insert(0, "env_step", np.arange(1, len(rewards) + 1))
 
     train_dates = pd.Series(train["date"].astype(str).unique())
     train_start_date = train_dates.iloc[0]
     train_end_date = train_dates.iloc[-1]
     suffix = f"{agent_name}_{REWARD_TYPE}_{train_start_date}_to_{train_end_date}_{today_str}"
 
-    reward_path = OUTPUT_DIR / f"train_reward_curve_{suffix}.csv"
-    plot_path = OUTPUT_DIR / f"train_reward_growth_curve_{suffix}.png"
+    reward_path = OUTPUT_DIR / f"train_eval_reward_by_step_{suffix}.csv"
+    plot_path = OUTPUT_DIR / f"train_eval_cumulative_reward_by_step_{suffix}.png"
     rewards.to_csv(reward_path, index=False, encoding="utf-8-sig")
-    plot_train_reward_curve(rewards, plot_path, agent_name)
+    plot_train_eval_reward_curve(rewards, plot_path, agent_name)
 
-    print(f"Train reward curve saved to {reward_path}")
-    print(f"Train reward curve plot saved to {plot_path}")
+    print(f"Train evaluation reward by step saved to {reward_path}")
+    print(f"Train evaluation reward plot saved to {plot_path}")
 
 # %% Part 2. Build environment
 
@@ -198,6 +285,7 @@ trained_a2c = (
 )
 if if_using_a2c:
     trained_a2c.save(TRAINED_MODEL_DIR + "/agent_a2c")
+    save_sb3_training_reward_curve("a2c")
     evaluate_on_train_and_save_reward_curve(trained_a2c, "a2c")
 
 # --- Agent 2: DDPG ---
@@ -215,6 +303,7 @@ trained_ddpg = (
 )
 if if_using_ddpg:
     trained_ddpg.save(TRAINED_MODEL_DIR + "/agent_ddpg")
+    save_sb3_training_reward_curve("ddpg")
     evaluate_on_train_and_save_reward_curve(trained_ddpg, "ddpg")
 
 # --- Agent 3: PPO ---
@@ -238,6 +327,7 @@ trained_ppo = (
 )
 if if_using_ppo:
     trained_ppo.save(TRAINED_MODEL_DIR + "/agent_ppo")
+    save_sb3_training_reward_curve("ppo")
     evaluate_on_train_and_save_reward_curve(trained_ppo, "ppo")
 
 # --- Agent 4: TD3 ---
@@ -260,6 +350,7 @@ trained_td3 = (
 )
 if if_using_td3:
     trained_td3.save(TRAINED_MODEL_DIR + "/agent_td3")
+    save_sb3_training_reward_curve("td3")
     evaluate_on_train_and_save_reward_curve(trained_td3, "td3")
 
 # --- Agent 5: SAC ---
@@ -284,6 +375,7 @@ trained_sac = (
 )
 if if_using_sac:
     trained_sac.save(TRAINED_MODEL_DIR + "/agent_sac")
+    save_sb3_training_reward_curve("sac")
     evaluate_on_train_and_save_reward_curve(trained_sac, "sac")
 
 print("All agents trained and saved to", TRAINED_MODEL_DIR)
