@@ -8,8 +8,10 @@ RESULTS_DIR = "results"
 
 # Default reward experiment settings
 # These are only defaults. Run_StockTrading_Examples.py can override them at runtime.
-REWARD_TYPE = "v0"
-REWARD_PARAMS = {"alpha": 0.05, "beta": 0.05, "gamma": 1.0, "n_recent": 14}
+# For reward v2: use REWARD_TYPE = "v2"
+# For reward v3: use REWARD_TYPE = "v3"
+REWARD_TYPE = "v2"
+REWARD_PARAMS = {"n_future": 5, "price_col": "close"}
 EXPERIMENT_ROOT = r"C:\Users\User\Desktop\GraduationProject\Experence_result"
 
 # date format: '%Y-%m-%d'

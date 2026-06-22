@@ -43,6 +43,36 @@ WINDOW_ID = env_str("WINDOW_ID", "")
 REPEAT_INDEX = env_str("REPEAT_INDEX", "")
 RANDOM_SEED = env_str("RANDOM_SEED", "")
 
+
+def get_reward_scaling(reward_type: str) -> float:
+    """
+    Choose reward_scaling by reward definition.
+
+    v0 is a money-difference reward, so it keeps FinRL's original 1e-4.
+    v1/v2/v3 are return-level rewards, so they should not be shrunk by 1e-4.
+    """
+    reward_key = str(reward_type).lower()
+
+    if reward_key in {"v0", "original", "finrl_original"}:
+        return 1e-4
+
+    if reward_key in {
+        "v1",
+        "our_reward_v1",
+        "v2",
+        "reward_v2",
+        "future_day_return",
+        "v3",
+        "reward_v3",
+        "future_avg_return",
+    }:
+        return 1.0
+
+    return 1.0
+
+
+REWARD_SCALING = get_reward_scaling(REWARD_TYPE)
+
 # %% Part 0. Create output folder
 
 if EXPERIMENT_DIR:
@@ -59,6 +89,7 @@ else:
 print("Backtest setting:")
 print(f"  REWARD_TYPE: {REWARD_TYPE}")
 print(f"  REWARD_PARAMS: {REWARD_PARAMS}")
+print(f"  REWARD_SCALING: {REWARD_SCALING}")
 print(f"  OUTPUT_DIR: {OUTPUT_DIR}")
 print(f"  TRAIN_DATA_PATH: {TRAIN_DATA_PATH}")
 print(f"  TRADE_DATA_PATH: {TRADE_DATA_PATH}")
@@ -69,6 +100,7 @@ save_config(
     {
         "reward_type": REWARD_TYPE,
         "reward_params": REWARD_PARAMS,
+        "reward_scaling": REWARD_SCALING,
         "trade_start_date": TRADE_START_DATE,
         "trade_end_date": TRADE_END_DATE,
         "indicators": INDICATORS,
@@ -126,7 +158,7 @@ env_kwargs = {
     "stock_dim": stock_dimension,
     "tech_indicator_list": INDICATORS,
     "action_space": stock_dimension,
-    "reward_scaling": 1e-4,
+    "reward_scaling": REWARD_SCALING,
 }
 
 
@@ -197,11 +229,13 @@ def save_agent_diagnostics(
 
 
 def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: str) -> None:
-    """Plot cash and stock holdings using two independent heatmaps and right-side colorbars.
+    """Plot a cash heatmap with an overlaid cash line and a stock holdings heatmap.
 
-    Cash is a dollar amount, while stock holdings are share counts, so they must use
-    separate color scales. To keep the layout consistent with the reference image,
-    both colorbars are placed on the right side as vertical bars.
+    The cash section shows:
+    1) a one-row cash heatmap labeled ``cash``
+    2) a line above it that traces intraday cash movement using
+       previous day close cash -> cash_after_sell -> cash_after_buy,
+       so users can still see trades even if end-of-day cash is similar.
     """
     if holdings.empty:
         return
@@ -210,8 +244,12 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
         holdings.insert(0, "date", np.arange(len(holdings)))
 
     dates = holdings["date"].astype(str).tolist()
+
     cash = holdings[["cash"]].T.astype(float) if "cash" in holdings.columns else pd.DataFrame()
-    stocks = holdings.drop(columns=["date", "cash"], errors="ignore").T.astype(float)
+    cash_after_sell = holdings["cash_after_sell"].astype(float) if "cash_after_sell" in holdings.columns else None
+    cash_after_buy = holdings["cash_after_buy"].astype(float) if "cash_after_buy" in holdings.columns else (holdings["cash"].astype(float) if "cash" in holdings.columns else None)
+
+    stocks = holdings.drop(columns=["date", "cash", "cash_after_sell", "cash_after_buy"], errors="ignore").T.astype(float)
 
     max_xticks = 12
     tick_positions = (
@@ -229,21 +267,22 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
         return f"{x:.0f}"
 
     stock_rows = max(len(stocks), 1)
-    fig_height = max(8, 0.23 * stock_rows + 2.8)
+    fig_height = max(8, 0.23 * stock_rows + 3.8)
     fig = plt.figure(figsize=(18, fig_height), constrained_layout=True)
     gs = fig.add_gridspec(
-        nrows=2,
+        nrows=3,
         ncols=2,
-        height_ratios=[0.9, max(5.5, 0.23 * stock_rows)],
+        height_ratios=[1.05, 0.7, max(5.5, 0.23 * stock_rows)],
         width_ratios=[40, 0.9],
-        hspace=0.08,
+        hspace=0.05,
         wspace=0.06,
     )
 
-    ax_cash = fig.add_subplot(gs[0, 0])
-    cax_cash = fig.add_subplot(gs[0, 1])
-    ax_stock = fig.add_subplot(gs[1, 0], sharex=ax_cash)
-    cax_stock = fig.add_subplot(gs[1, 1])
+    ax_cash_line = fig.add_subplot(gs[0, 0])
+    ax_cash = fig.add_subplot(gs[1, 0], sharex=ax_cash_line)
+    cax_cash = fig.add_subplot(gs[0:2, 1])
+    ax_stock = fig.add_subplot(gs[2, 0], sharex=ax_cash)
+    cax_stock = fig.add_subplot(gs[2, 1])
 
     if not cash.empty:
         cash_img = ax_cash.imshow(
@@ -259,7 +298,37 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
         cbar_cash.set_label("Cash balance", labelpad=10)
         cbar_cash.ax.yaxis.set_major_formatter(FuncFormatter(money_formatter))
         cbar_cash.ax.tick_params(labelsize=9)
+
+        if cash_after_buy is not None:
+            line_x = [0.0]
+            line_y = [float(cash_after_buy.iloc[0])]
+            for i in range(1, len(holdings)):
+                prev_end_cash = float(cash_after_buy.iloc[i - 1])
+                sell_cash = float(cash_after_sell.iloc[i]) if cash_after_sell is not None else prev_end_cash
+                buy_cash = float(cash_after_buy.iloc[i])
+                line_x.extend([i - 0.28, i, i + 0.28])
+                line_y.extend([prev_end_cash, sell_cash, buy_cash])
+
+            ax_cash_line.plot(line_x, line_y, linewidth=2.6)
+            ax_cash_line.set_ylabel("Cash")
+            ax_cash_line.yaxis.set_major_formatter(FuncFormatter(money_formatter))
+            ax_cash_line.grid(True, axis="y", alpha=0.25)
+            ax_cash_line.set_xlim(-0.5, max(len(dates) - 0.5, 0.5))
+            ax_cash_line.set_title(f"Holdings Heatmap - {agent_name.upper()} ({REWARD_TYPE})", pad=8)
+            ax_cash_line.text(
+                0.995,
+                0.92,
+                "Line: prev close cash → after sell → after buy",
+                ha="right",
+                va="top",
+                transform=ax_cash_line.transAxes,
+                fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.75, edgecolor="none"),
+            )
+        else:
+            ax_cash_line.axis("off")
     else:
+        ax_cash_line.axis("off")
         ax_cash.axis("off")
         cax_cash.axis("off")
 
@@ -285,11 +354,12 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
     if len(tick_positions) > 0:
         ax_stock.set_xticks(tick_positions)
         ax_stock.set_xticklabels([dates[i] for i in tick_positions], rotation=45, ha="right")
+    plt.setp(ax_cash_line.get_xticklabels(), visible=False)
     plt.setp(ax_cash.get_xticklabels(), visible=False)
+    ax_cash_line.tick_params(axis="x", length=0)
     ax_cash.tick_params(axis="x", length=0)
-
-    ax_cash.set_title(f"Holdings Heatmap - {agent_name.upper()} ({REWARD_TYPE})", pad=8)
     ax_stock.set_xlabel("Date")
+
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 

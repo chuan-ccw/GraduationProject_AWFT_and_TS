@@ -111,6 +111,8 @@ class StockTradingEnv(gym.Env):
         self.state_memory = (
             []
         )  # we need sometimes to preserve the state in the middle of trading process
+        self.last_cash_after_sell = float(self.state[0])
+        self.last_cash_after_buy = float(self.state[0])
         self.holdings_memory = [self._get_holdings_snapshot()]
         self.date_memory = [self._get_date()]
         #         self.logger = Logger('results',[CSVOutputFormat])
@@ -370,10 +372,13 @@ class StockTradingEnv(gym.Env):
                 # print(f'take sell action after : {actions[index]}')
                 # print(f"Num shares after: {self.state[index+self.stock_dim+1]}")
 
+            self.last_cash_after_sell = float(self.state[0])
+
             for index in buy_index:
                 # print('take buy action: {}'.format(actions[index]))
                 actions[index] = self._buy_stock(index, actions[index])
 
+            self.last_cash_after_buy = float(self.state[0])
             self.actions_memory.append(actions)
 
             # state: s -> s+1
@@ -463,6 +468,8 @@ class StockTradingEnv(gym.Env):
         self.rewards_memory = []
         self.actions_memory = []
         self.state_memory = []
+        self.last_cash_after_sell = float(self.state[0])
+        self.last_cash_after_buy = float(self.state[0])
         self.holdings_memory = [self._get_holdings_snapshot()]
         self.date_memory = [self._get_date()]
 
@@ -570,11 +577,13 @@ class StockTradingEnv(gym.Env):
 
     def _get_holdings_snapshot(self):
         cash = float(self.state[0])
+        cash_after_sell = float(getattr(self, "last_cash_after_sell", cash))
+        cash_after_buy = float(getattr(self, "last_cash_after_buy", cash))
         shares = list(self.state[(self.stock_dim + 1) : (self.stock_dim * 2 + 1)])
-        return [cash] + [float(x) for x in shares]
+        return [cash, cash_after_sell, cash_after_buy] + [float(x) for x in shares]
 
     def save_holdings_memory(self):
-        columns = ["cash"] + self._get_tic_list()
+        columns = ["cash", "cash_after_sell", "cash_after_buy"] + self._get_tic_list()
         df_holdings = pd.DataFrame(self.holdings_memory, columns=columns)
         df_holdings.insert(0, "date", self.date_memory[: len(df_holdings)])
         return df_holdings

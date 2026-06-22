@@ -21,15 +21,34 @@ from finrl import config
 # 1. 在這裡統一設定本次實驗參數
 # =====================================================
 
-# Reward 選擇："v0" = FinRL 原版 reward；"v1" = 我們設計的 reward
-REWARD_TYPE = "v1"
-REWARD_PARAMS = {
-    "alpha": 0.05,
-    "beta": 0.05,
-    # gamma 若設為 0，代表 portfolio value 已扣手續費，reward 不額外懲罰交易成本
-    # "gamma": 1.0,
-    "n_recent": 14,
+# Reward 選擇：
+#   "v0" = FinRL 原版 reward，使用 portfolio value change
+#   "v1" = simple return + buy low score + sell high score
+#   "v2" = sum(action * future t+n day simple return)
+#   "v3" = sum(action * future n-day average simple return)
+#
+# 要測 v2：REWARD_TYPE = "v3"
+# 要測 v3：REWARD_TYPE = "v3"
+REWARD_TYPE = "v2"
+
+REWARD_PARAMS_BY_TYPE = {
+    "v0": {},
+    "v1": {
+        "alpha": 0.05,
+        "beta": 0.05,
+        "n_recent": 14,
+    },
+    "v2": {
+        "n_future": 5,
+        "price_col": "close",
+    },
+    "v3": {
+        "n_future": 5,
+        "price_col": "close",
+    },
 }
+
+REWARD_PARAMS = REWARD_PARAMS_BY_TYPE.get(REWARD_TYPE, {})
 
 # Rolling Window 設定
 ROLLING_WINDOW_MODE = True
@@ -41,7 +60,7 @@ SHIFT_YEARS = 1
 
 # 每個 rolling window 重複實驗次數
 # 注意：repeat_01 在 window_01 ~ window_05 使用相同 seed；repeat_02 才換下一個 seed。
-REPEAT_EXPERIMENTS = 3
+REPEAT_EXPERIMENTS = 5
 BASE_RANDOM_SEED = 42
 
 # 非 rolling mode 才會用到這組日期
@@ -64,6 +83,11 @@ RUN_DATA = True
 RUN_TRAIN = True
 RUN_BACKTEST = True
 
+# 是否在 rolling 實驗結束後自動使用「最新」v0/v1 產生比較圖。
+# 建議正式實驗設為 False，改用 examples/Compare_V0_V1_Manual.py
+# 手動指定要比較的 v0/v1 rolling 資料夾，避免修改時間造成抓錯資料。
+AUTO_COMPARE_LATEST = False
+
 # Agent 開關：train 和 backtest 會共用這裡的設定
 IF_USING_A2C = False
 IF_USING_DDPG = False
@@ -74,7 +98,7 @@ IF_USING_SAC = False
 # 訓練步數
 A2C_TOTAL_TIMESTEPS = 20000
 DDPG_TOTAL_TIMESTEPS = 20000
-PPO_TOTAL_TIMESTEPS = 10000
+PPO_TOTAL_TIMESTEPS = 100000
 TD3_TOTAL_TIMESTEPS = 20000
 SAC_TOTAL_TIMESTEPS = 20000
 
@@ -133,20 +157,17 @@ def generate_rolling_windows(
 
 
 def create_rolling_root() -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    date_tag = datetime.now().strftime("%Y%m%d")
     start_year = _year(ROLLING_START_DATE)
     end_year = _year(ROLLING_END_DATE)
     run_name = (
         f"rolling_{start_year}-{end_year}_"
         f"train{TRAIN_YEARS}y_test{TEST_YEARS}y_shift{SHIFT_YEARS}y_"
-        f"{timestamp}_{REWARD_TYPE}"
+        f"{date_tag}"
     )
-    rolling_root = (
-        Path(EXPERIMENT_ROOT)
-        / f"reward_{REWARD_TYPE}"
-        / "rolling_window"
-        / run_name
-    )
+    rolling_root = Path(EXPERIMENT_ROOT) / f"reward_{REWARD_TYPE}" / run_name
+    if rolling_root.exists():
+        rolling_root = Path(EXPERIMENT_ROOT) / f"reward_{REWARD_TYPE}" / f"{run_name}_{datetime.now().strftime('%H%M%S')}"
     rolling_root.mkdir(parents=True, exist_ok=True)
     return rolling_root
 
@@ -325,7 +346,7 @@ def write_rolling_summaries(rolling_root: Path, summary_rows: list[dict[str, Any
     import pandas as pd
 
     summary_df = pd.DataFrame(summary_rows)
-    summary_path = rolling_root / "rolling_summary.csv"
+    summary_path = rolling_root / f"summary_{REWARD_TYPE}.csv"
     summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
 
     numeric_cols = [
@@ -340,7 +361,7 @@ def write_rolling_summaries(rolling_root: Path, summary_rows: list[dict[str, Any
             .reset_index()
         )
         agg.columns = ["_".join([str(x) for x in col if str(x) != ""]) for col in agg.columns]
-        agg_path = rolling_root / "rolling_window_aggregate_summary.csv"
+        agg_path = rolling_root / f"summary_window_aggregate_{REWARD_TYPE}.csv"
         agg.to_csv(agg_path, index=False, encoding="utf-8-sig")
 
     print(f"Rolling summary saved to: {summary_path}")
@@ -361,12 +382,22 @@ def _read_backtest_csv(csv_path: Path) -> pd.DataFrame | None:
         return None
 
 
-def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
-    """For one rolling window, aggregate repeated backtest results across seeds.
+def _normalize_series(series: pd.Series) -> pd.Series:
+    series = pd.to_numeric(series, errors="coerce")
+    first_valid = series.dropna()
+    if first_valid.empty or first_valid.iloc[0] == 0:
+        return series
+    return series / first_valid.iloc[0]
 
-    Output:
-      1. CSV containing ppo mean/min/max and mean mvo/dji
-      2. PNG where PPO is a blue mean line with a light blue min-max band
+
+def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
+    """Create the per-window five-repeat mean folder used by v0/v1 comparison.
+
+    Output folder:
+      repeat_mean_v0/ or repeat_mean_v1/
+        account_value.csv        -> ppo mean/min/max + dji mean, normalized columns
+        backtest_result.csv      -> same content, convenient for plotting
+        backtest_result_repeat_mean_*.csv/png
     """
     repeat_dirs = sorted([p for p in window_dir.iterdir() if p.is_dir() and p.name.startswith("repeat_")])
     if not repeat_dirs:
@@ -387,7 +418,7 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
             continue
 
         if trade_start_date is None or trade_end_date is None:
-            name = csv_path.stem  # backtest_result_v0_2021-01-01_to_2021-12-31_0526
+            name = csv_path.stem
             prefix = f"backtest_result_{reward_type}_"
             if name.startswith(prefix):
                 tail = name[len(prefix):]
@@ -401,7 +432,7 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
                     except Exception:
                         pass
 
-        keep_cols = [c for c in ["date", "ppo", "mvo", "dji"] if c in df.columns]
+        keep_cols = [c for c in ["date", "ppo", "dji"] if c in df.columns]
         run_dfs.append(df[keep_cols].copy())
 
     if not run_dfs:
@@ -410,20 +441,16 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
 
     base_dates = run_dfs[0]["date"].astype(str)
     ppo_runs = []
-    mvo_runs = []
     dji_runs = []
 
     for run_idx, df in enumerate(run_dfs, start=1):
         aligned = df.set_index("date").reindex(base_dates).reset_index()
         if "ppo" in aligned.columns:
             ppo_runs.append(pd.to_numeric(aligned["ppo"], errors="coerce").rename(f"ppo_run_{run_idx:02d}"))
-        if "mvo" in aligned.columns:
-            mvo_runs.append(pd.to_numeric(aligned["mvo"], errors="coerce").rename(f"mvo_run_{run_idx:02d}"))
         if "dji" in aligned.columns:
             dji_runs.append(pd.to_numeric(aligned["dji"], errors="coerce").rename(f"dji_run_{run_idx:02d}"))
 
     ppo_df = pd.concat(ppo_runs, axis=1) if ppo_runs else pd.DataFrame(index=range(len(base_dates)))
-    mvo_df = pd.concat(mvo_runs, axis=1) if mvo_runs else pd.DataFrame(index=range(len(base_dates)))
     dji_df = pd.concat(dji_runs, axis=1) if dji_runs else pd.DataFrame(index=range(len(base_dates)))
 
     aggregate_df = pd.DataFrame({"date": base_dates})
@@ -431,51 +458,168 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
         aggregate_df["ppo_mean"] = ppo_df.mean(axis=1)
         aggregate_df["ppo_min"] = ppo_df.min(axis=1)
         aggregate_df["ppo_max"] = ppo_df.max(axis=1)
-    if not mvo_df.empty:
-        aggregate_df["mvo_mean"] = mvo_df.mean(axis=1)
+        aggregate_df["ppo_mean_norm"] = _normalize_series(aggregate_df["ppo_mean"])
+        aggregate_df["ppo_min_norm"] = _normalize_series(aggregate_df["ppo_min"])
+        aggregate_df["ppo_max_norm"] = _normalize_series(aggregate_df["ppo_max"])
     if not dji_df.empty:
         aggregate_df["dji_mean"] = dji_df.mean(axis=1)
+        aggregate_df["dji_mean_norm"] = _normalize_series(aggregate_df["dji_mean"])
 
     trade_start_date = trade_start_date or str(base_dates.iloc[0])
     trade_end_date = trade_end_date or str(base_dates.iloc[-1])
 
-    aggregate_csv_path = window_dir / f"backtest_result_repeat_mean_{reward_type}_{trade_start_date}_to_{trade_end_date}_{date_suffix}.csv"
+    mean_dir = window_dir / f"repeat_mean_{reward_type}"
+    mean_dir.mkdir(parents=True, exist_ok=True)
+    account_value_path = mean_dir / "account_value.csv"
+    backtest_result_path = mean_dir / "backtest_result.csv"
+    aggregate_df.to_csv(account_value_path, index=False, encoding="utf-8-sig")
+    aggregate_df.to_csv(backtest_result_path, index=False, encoding="utf-8-sig")
+
+    aggregate_csv_path = mean_dir / f"backtest_result_repeat_mean_{reward_type}_{trade_start_date}_to_{trade_end_date}_{date_suffix}.csv"
     aggregate_df.to_csv(aggregate_csv_path, index=False, encoding="utf-8-sig")
 
-    plt.rcParams["figure.figsize"] = (15, 5)
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(15, 5))
     x = np.arange(len(aggregate_df))
 
-    if {"ppo_mean", "ppo_min", "ppo_max"}.issubset(aggregate_df.columns):
-        ppo_mean = pd.to_numeric(aggregate_df["ppo_mean"], errors="coerce")
-        ppo_min = pd.to_numeric(aggregate_df["ppo_min"], errors="coerce")
-        ppo_max = pd.to_numeric(aggregate_df["ppo_max"], errors="coerce")
-        ax.fill_between(x, ppo_min, ppo_max, color="blue", alpha=0.18, label="ppo range (min-max)")
-        ax.plot(x, ppo_mean, color="blue", linewidth=2.2, label="ppo mean")
+    if {"ppo_mean_norm", "ppo_min_norm", "ppo_max_norm"}.issubset(aggregate_df.columns):
+        ppo_mean = pd.to_numeric(aggregate_df["ppo_mean_norm"], errors="coerce")
+        ppo_min = pd.to_numeric(aggregate_df["ppo_min_norm"], errors="coerce")
+        ppo_max = pd.to_numeric(aggregate_df["ppo_max_norm"], errors="coerce")
+        ret = (ppo_mean.dropna().iloc[-1] - 1) * 100 if ppo_mean.notna().any() else 0
+        ax.fill_between(x, ppo_min, ppo_max, color="blue", alpha=0.16, label=f"{reward_type} PPO range")
+        ax.plot(x, ppo_mean, color="blue", linewidth=2.2, label=f"{reward_type} PPO mean ({ret:.2f}%)")
 
-    if "mvo_mean" in aggregate_df.columns:
-        ax.plot(x, aggregate_df["mvo_mean"], color="tab:orange", label="mvo")
-    if "dji_mean" in aggregate_df.columns:
-        ax.plot(x, aggregate_df["dji_mean"], color="tab:green", label="dji")
+    if "dji_mean_norm" in aggregate_df.columns:
+        dji_mean = pd.to_numeric(aggregate_df["dji_mean_norm"], errors="coerce")
+        ret = (dji_mean.dropna().iloc[-1] - 1) * 100 if dji_mean.notna().any() else 0
+        ax.plot(x, dji_mean, color="tab:green", label=f"DJI ({ret:.2f}%)")
 
+    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1, label="portfolio value = 1.0")
     max_xticks = 12
     if len(aggregate_df) > 0:
         tick_positions = np.linspace(0, len(aggregate_df) - 1, min(max_xticks, len(aggregate_df))).astype(int)
         ax.set_xticks(tick_positions)
-        ax.set_xticklabels([aggregate_df["date"].iloc[i] for i in tick_positions])
+        ax.set_xticklabels([aggregate_df["date"].iloc[i] for i in tick_positions], rotation=45, ha="right")
 
-    ax.set_title("Portfolio Value Over Time")
+    ax.set_title(f"Repeat Mean Portfolio Value - {reward_type.upper()} (initial = 1.0)")
     ax.set_xlabel("Date")
-    ax.set_ylabel("Portfolio Value ($)")
+    ax.set_ylabel("Portfolio Value (initial = 1.0)")
     ax.legend()
-    plt.xticks(rotation=0)
     plt.tight_layout()
 
-    aggregate_plot_path = window_dir / f"backtest_result_repeat_mean_{reward_type}_{trade_start_date}_to_{trade_end_date}_{date_suffix}.png"
+    aggregate_plot_path = mean_dir / f"backtest_result_repeat_mean_{reward_type}_{trade_start_date}_to_{trade_end_date}_{date_suffix}.png"
     plt.savefig(aggregate_plot_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"Window aggregate csv saved to: {aggregate_csv_path}")
-    print(f"Window aggregate plot saved to: {aggregate_plot_path}")
+    print(f"Window repeat-mean folder saved to: {mean_dir}")
+
+
+def _find_latest_rolling_root(reward_type: str) -> Path | None:
+    reward_root = Path(EXPERIMENT_ROOT) / f"reward_{reward_type}"
+    if not reward_root.exists():
+        return None
+    candidates = [p for p in reward_root.iterdir() if p.is_dir() and p.name.startswith("rolling_")]
+    if not candidates:
+        # backward compatibility for older output layout: reward_v?/rolling_window/rolling_...
+        legacy_root = reward_root / "rolling_window"
+        if legacy_root.exists():
+            candidates = [p for p in legacy_root.iterdir() if p.is_dir() and p.name.startswith("rolling_")]
+    return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
+
+
+def _collect_repeat_mean_series(rolling_root: Path, reward_type: str) -> pd.DataFrame | None:
+    frames = []
+    for csv_path in sorted(rolling_root.glob(f"window_*/repeat_mean_{reward_type}/backtest_result.csv")):
+        df = pd.read_csv(csv_path)
+        if not df.empty:
+            frames.append(df)
+    if not frames:
+        return None
+    out = pd.concat(frames, ignore_index=True)
+    out = out.drop_duplicates(subset=["date"], keep="last")
+    return out
+
+
+def compare_latest_v0_v1() -> None:
+    """Create Experence_result/compare_v0_v1 using latest v0/v1 repeat-mean outputs."""
+    root_v0 = _find_latest_rolling_root("v0")
+    root_v1 = _find_latest_rolling_root("v1")
+    if root_v0 is None or root_v1 is None:
+        print("compare_v0_v1 skipped: 找不到 v0 或 v1 的 rolling 結果。")
+        return
+
+    df_v0 = _collect_repeat_mean_series(root_v0, "v0")
+    df_v1 = _collect_repeat_mean_series(root_v1, "v1")
+    if df_v0 is None or df_v1 is None:
+        print("compare_v0_v1 skipped: v0/v1 尚未產生 repeat_mean 資料夾。")
+        return
+
+    compare_dir = Path(EXPERIMENT_ROOT) / "compare_v0_v1"
+    compare_dir.mkdir(parents=True, exist_ok=True)
+
+    merged = pd.merge(
+        df_v0[[c for c in ["date", "ppo_mean_norm", "ppo_min_norm", "ppo_max_norm", "dji_mean_norm"] if c in df_v0.columns]],
+        df_v1[[c for c in ["date", "ppo_mean_norm", "ppo_min_norm", "ppo_max_norm"] if c in df_v1.columns]],
+        on="date",
+        how="outer",
+        suffixes=("_v0", "_v1"),
+    ).sort_values("date")
+    merged.to_csv(compare_dir / "compare_metrics.csv", index=False, encoding="utf-8-sig")
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+    x = np.arange(len(merged))
+
+    def add_strategy(prefix: str, color: str, label: str) -> None:
+        mean_col = f"ppo_mean_norm_{prefix}"
+        min_col = f"ppo_min_norm_{prefix}"
+        max_col = f"ppo_max_norm_{prefix}"
+        if mean_col not in merged.columns:
+            return
+        mean = pd.to_numeric(merged[mean_col], errors="coerce")
+        min_v = pd.to_numeric(merged[min_col], errors="coerce") if min_col in merged.columns else mean
+        max_v = pd.to_numeric(merged[max_col], errors="coerce") if max_col in merged.columns else mean
+        valid = mean.dropna()
+        ret = (valid.iloc[-1] - 1) * 100 if not valid.empty else 0
+        ax.fill_between(x, min_v, max_v, color=color, alpha=0.14, label=f"{label} range")
+        ax.plot(x, mean, color=color, linewidth=2.2, label=f"{label} mean ({ret:.2f}%)")
+
+    add_strategy("v0", "blue", "v0")
+    add_strategy("v1", "red", "v1")
+
+    if "dji_mean_norm" in merged.columns:
+        dji = pd.to_numeric(merged["dji_mean_norm"], errors="coerce")
+    elif "dji_mean_norm_v0" in merged.columns:
+        dji = pd.to_numeric(merged["dji_mean_norm_v0"], errors="coerce")
+    else:
+        dji = pd.Series(dtype=float)
+    if not dji.empty and dji.notna().any():
+        valid = dji.dropna()
+        ret = (valid.iloc[-1] - 1) * 100
+        ax.plot(x, dji, color="tab:green", linewidth=1.8, label=f"DJI ({ret:.2f}%)")
+
+    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1, label="portfolio value = 1.0")
+    max_xticks = 14
+    if len(merged) > 0:
+        tick_positions = np.linspace(0, len(merged) - 1, min(max_xticks, len(merged))).astype(int)
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels([str(merged["date"].iloc[i]) for i in tick_positions], rotation=45, ha="right")
+    ax.set_title("v0 vs v1 Repeat-Mean Portfolio Value (MVO excluded)")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Portfolio Value (initial = 1.0)")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(compare_dir / "compare_portfolio_value.png", dpi=150, bbox_inches="tight")
+    fig.savefig(compare_dir / "compare_report.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # Lightweight aliases requested by task4.
+    for name in ["compare_cumulative_return.png", "compare_reward_curve.png"]:
+        try:
+            import shutil
+            shutil.copyfile(compare_dir / "compare_portfolio_value.png", compare_dir / name)
+        except Exception:
+            pass
+
+    print(f"compare_v0_v1 saved to: {compare_dir}")
 
 
 # =====================================================
@@ -582,6 +726,12 @@ if __name__ == "__main__":
         for window in windows:
             window_dir = rolling_root / window_folder_name(window)
             plot_window_repeat_aggregate(window_dir, REWARD_TYPE)
+
+        if AUTO_COMPARE_LATEST:
+            compare_latest_v0_v1()
+        else:
+            print("compare_latest_v0_v1 skipped: AUTO_COMPARE_LATEST=False。")
+            print("若要指定 v0/v1 資料夾比較，請執行 examples/Compare_V0_V1_Manual.py。")
 
         print("🎉 Rolling Window 重複實驗全部執行完畢！")
         print(f"結果總資料夾：{rolling_root}")
