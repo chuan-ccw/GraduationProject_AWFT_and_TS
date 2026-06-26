@@ -26,9 +26,7 @@ from finrl import config
 #   "v1" = simple return + buy low score + sell high score
 #   "v2" = sum(action * future t+n day simple return)
 #   "v3" = sum(action * future n-day average simple return)
-#
-# 要測 v2：REWARD_TYPE = "v3"
-# 要測 v3：REWARD_TYPE = "v3"
+
 REWARD_TYPE = "v2"
 
 REWARD_PARAMS_BY_TYPE = {
@@ -49,6 +47,63 @@ REWARD_PARAMS_BY_TYPE = {
 }
 
 REWARD_PARAMS = REWARD_PARAMS_BY_TYPE.get(REWARD_TYPE, {})
+
+REWARD_DISPLAY_NAMES = {
+    "v0": "original_reward",
+    "original": "original_reward",
+    "finrl_original": "original_reward",
+    "v1": "buy_low_sell_high_reward",
+    "our_reward_v1": "buy_low_sell_high_reward",
+    "v2": "future_day_reward",
+    "reward_v2": "future_day_reward",
+    "future_day_return": "future_day_reward",
+    "v3": "future_avg_reward",
+    "reward_v3": "future_avg_reward",
+    "future_avg_return": "future_avg_reward",
+}
+
+
+def reward_display_name(reward_type: str | None) -> str:
+    """Return the display name used in plots instead of v0/v1/v2/v3."""
+    key = str(reward_type or "").strip().lower()
+    if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
+        key = key[len("reward_"):]
+    return REWARD_DISPLAY_NAMES.get(key, str(reward_type or ""))
+
+
+def set_axis_labels_horizontal(ax, xlabel: str | None = None, ylabel: str | None = None, ylabel_pad: int = 65) -> None:
+    """Keep x-axis label horizontal, but keep y-axis label in the default vertical style."""
+    if xlabel is not None:
+        ax.set_xlabel(xlabel, rotation=0)
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
+
+
+def format_yyyy_mm(value) -> str:
+    """Format plot x-axis date labels as YYYY-MM, never YYYY/MM."""
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.notna(ts):
+        return ts.strftime("%Y-%m")
+    text = str(value)
+    match = __import__("re").search(r"(\d{4})[-/](\d{1,2})", text)
+    if match:
+        return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}"
+    return text
+
+
+def make_month_tick_positions(length: int, max_xticks: int = 12) -> np.ndarray:
+    if length <= 0:
+        return np.array([], dtype=int)
+    return np.linspace(0, length - 1, min(max_xticks, length)).astype(int)
+
+
+def set_month_xticklabels(ax, dates, max_xticks: int = 12) -> None:
+    positions = make_month_tick_positions(len(dates), max_xticks=max_xticks)
+    if len(positions) == 0:
+        return
+    ax.set_xticks(positions)
+    ax.set_xticklabels([format_yyyy_mm(dates[i]) for i in positions], rotation=0, ha="center")
+
 
 # Rolling Window 設定
 ROLLING_WINDOW_MODE = True
@@ -83,9 +138,9 @@ RUN_DATA = True
 RUN_TRAIN = True
 RUN_BACKTEST = True
 
-# 是否在 rolling 實驗結束後自動使用「最新」v0/v1 產生比較圖。
-# 建議正式實驗設為 False，改用 examples/Compare_V0_V1_Manual.py
-# 手動指定要比較的 v0/v1 rolling 資料夾，避免修改時間造成抓錯資料。
+# 是否在 rolling 實驗結束後自動使用「最新」v0 與目前 REWARD_TYPE 產生比較圖。
+# 例如 REWARD_TYPE="v2" 時，會產生 v0 vs v2；REWARD_TYPE="v3" 時，會產生 v0 vs v3。
+# 建議正式實驗設為 False，改用 examples/Compare_V0_V1_Manual.py 手動指定資料夾。
 AUTO_COMPARE_LATEST = False
 
 # Agent 開關：train 和 backtest 會共用這裡的設定
@@ -480,14 +535,15 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
 
     fig, ax = plt.subplots(figsize=(15, 5))
     x = np.arange(len(aggregate_df))
+    reward_name = reward_display_name(reward_type)
 
     if {"ppo_mean_norm", "ppo_min_norm", "ppo_max_norm"}.issubset(aggregate_df.columns):
         ppo_mean = pd.to_numeric(aggregate_df["ppo_mean_norm"], errors="coerce")
         ppo_min = pd.to_numeric(aggregate_df["ppo_min_norm"], errors="coerce")
         ppo_max = pd.to_numeric(aggregate_df["ppo_max_norm"], errors="coerce")
         ret = (ppo_mean.dropna().iloc[-1] - 1) * 100 if ppo_mean.notna().any() else 0
-        ax.fill_between(x, ppo_min, ppo_max, color="blue", alpha=0.16, label=f"{reward_type} PPO range")
-        ax.plot(x, ppo_mean, color="blue", linewidth=2.2, label=f"{reward_type} PPO mean ({ret:.2f}%)")
+        ax.fill_between(x, ppo_min, ppo_max, color="blue", alpha=0.16, label=f"{reward_name} PPO range")
+        ax.plot(x, ppo_mean, color="blue", linewidth=2.2, label=f"{reward_name} PPO mean ({ret:.2f}%)")
 
     if "dji_mean_norm" in aggregate_df.columns:
         dji_mean = pd.to_numeric(aggregate_df["dji_mean_norm"], errors="coerce")
@@ -495,20 +551,16 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
         ax.plot(x, dji_mean, color="tab:green", label=f"DJI ({ret:.2f}%)")
 
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1, label="portfolio value = 1.0")
-    max_xticks = 12
-    if len(aggregate_df) > 0:
-        tick_positions = np.linspace(0, len(aggregate_df) - 1, min(max_xticks, len(aggregate_df))).astype(int)
-        ax.set_xticks(tick_positions)
-        ax.set_xticklabels([aggregate_df["date"].iloc[i] for i in tick_positions], rotation=45, ha="right")
+    set_month_xticklabels(ax, aggregate_df["date"].tolist(), max_xticks=12)
 
-    ax.set_title(f"Repeat Mean Portfolio Value - {reward_type.upper()} (initial = 1.0)")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Portfolio Value (initial = 1.0)")
+    ax.set_title(f"Repeat Mean Portfolio Value - {reward_name} (initial = 1.0)")
+    set_axis_labels_horizontal(ax, "Date", "Portfolio Value (initial = 1.0)", ylabel_pad=85)
     ax.legend()
     plt.tight_layout()
 
     aggregate_plot_path = mean_dir / f"backtest_result_repeat_mean_{reward_type}_{trade_start_date}_to_{trade_end_date}_{date_suffix}.png"
     plt.savefig(aggregate_plot_path, dpi=150, bbox_inches="tight")
+    plt.savefig(mean_dir / "backtest_result_repeat_mean.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Window repeat-mean folder saved to: {mean_dir}")
 
@@ -540,38 +592,60 @@ def _collect_repeat_mean_series(rolling_root: Path, reward_type: str) -> pd.Data
 
 
 def compare_latest_v0_v1() -> None:
-    """Create Experence_result/compare_v0_v1 using latest v0/v1 repeat-mean outputs."""
+    """Backward-compatible wrapper: compare latest v0 with latest current REWARD_TYPE."""
+    compare_latest_v0_target(REWARD_TYPE)
+
+
+def compare_latest_v0_target(target_reward_type: str) -> None:
+    """Create Experence_result/compare_v0_<target> using latest repeat-mean outputs.
+
+    The baseline is always v0. The target side follows the current REWARD_TYPE,
+    so running this script with REWARD_TYPE="v2" automatically creates v0 vs v2.
+    """
+    target_reward_type = str(target_reward_type).strip().lower()
+    if not target_reward_type or target_reward_type in {"v0", "original", "finrl_original"}:
+        print("compare_v0_target skipped: 目前 REWARD_TYPE 是 v0，沒有非 v0 版本可比較。")
+        return
+
     root_v0 = _find_latest_rolling_root("v0")
-    root_v1 = _find_latest_rolling_root("v1")
-    if root_v0 is None or root_v1 is None:
-        print("compare_v0_v1 skipped: 找不到 v0 或 v1 的 rolling 結果。")
+    root_target = _find_latest_rolling_root(target_reward_type)
+    if root_v0 is None or root_target is None:
+        print(f"compare_v0_{target_reward_type} skipped: 找不到 v0 或 {target_reward_type} 的 rolling 結果。")
         return
 
     df_v0 = _collect_repeat_mean_series(root_v0, "v0")
-    df_v1 = _collect_repeat_mean_series(root_v1, "v1")
-    if df_v0 is None or df_v1 is None:
-        print("compare_v0_v1 skipped: v0/v1 尚未產生 repeat_mean 資料夾。")
+    df_target = _collect_repeat_mean_series(root_target, target_reward_type)
+    if df_v0 is None or df_target is None:
+        print(f"compare_v0_{target_reward_type} skipped: v0/{target_reward_type} 尚未產生 repeat_mean 資料夾。")
         return
 
-    compare_dir = Path(EXPERIMENT_ROOT) / "compare_v0_v1"
+    compare_dir = Path(EXPERIMENT_ROOT) / f"compare_v0_{target_reward_type}"
     compare_dir.mkdir(parents=True, exist_ok=True)
 
+    target_cols = [c for c in ["date", "ppo_mean_norm", "ppo_min_norm", "ppo_max_norm", "dji_mean_norm"] if c in df_target.columns]
     merged = pd.merge(
         df_v0[[c for c in ["date", "ppo_mean_norm", "ppo_min_norm", "ppo_max_norm", "dji_mean_norm"] if c in df_v0.columns]],
-        df_v1[[c for c in ["date", "ppo_mean_norm", "ppo_min_norm", "ppo_max_norm"] if c in df_v1.columns]],
+        df_target[target_cols],
         on="date",
         how="outer",
-        suffixes=("_v0", "_v1"),
-    ).sort_values("date")
+        suffixes=("_v0", f"_{target_reward_type}"),
+    ).sort_values("date").reset_index(drop=True)
     merged.to_csv(compare_dir / "compare_metrics.csv", index=False, encoding="utf-8-sig")
 
     fig, ax = plt.subplots(figsize=(16, 6))
     x = np.arange(len(merged))
+    baseline_name = reward_display_name("v0")
+    target_name = reward_display_name(target_reward_type)
 
     def add_strategy(prefix: str, color: str, label: str) -> None:
         mean_col = f"ppo_mean_norm_{prefix}"
         min_col = f"ppo_min_norm_{prefix}"
         max_col = f"ppo_max_norm_{prefix}"
+        # If pandas did not suffix because the column did not overlap, support the plain column too.
+        if mean_col not in merged.columns and prefix == target_reward_type and "ppo_mean_norm" in merged.columns:
+            mean_col = "ppo_mean_norm"
+            min_col = "ppo_min_norm"
+            max_col = "ppo_max_norm"
         if mean_col not in merged.columns:
             return
         mean = pd.to_numeric(merged[mean_col], errors="coerce")
@@ -582,29 +656,20 @@ def compare_latest_v0_v1() -> None:
         ax.fill_between(x, min_v, max_v, color=color, alpha=0.14, label=f"{label} range")
         ax.plot(x, mean, color=color, linewidth=2.2, label=f"{label} mean ({ret:.2f}%)")
 
-    add_strategy("v0", "blue", "v0")
-    add_strategy("v1", "red", "v1")
+    add_strategy("v0", "blue", baseline_name)
+    add_strategy(target_reward_type, "red", target_name)
 
-    if "dji_mean_norm" in merged.columns:
-        dji = pd.to_numeric(merged["dji_mean_norm"], errors="coerce")
-    elif "dji_mean_norm_v0" in merged.columns:
-        dji = pd.to_numeric(merged["dji_mean_norm_v0"], errors="coerce")
-    else:
-        dji = pd.Series(dtype=float)
+    dji_candidates = ["dji_mean_norm", "dji_mean_norm_v0", f"dji_mean_norm_{target_reward_type}"]
+    dji = next((pd.to_numeric(merged[c], errors="coerce") for c in dji_candidates if c in merged.columns), pd.Series(dtype=float))
     if not dji.empty and dji.notna().any():
         valid = dji.dropna()
         ret = (valid.iloc[-1] - 1) * 100
         ax.plot(x, dji, color="tab:green", linewidth=1.8, label=f"DJI ({ret:.2f}%)")
 
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1, label="portfolio value = 1.0")
-    max_xticks = 14
-    if len(merged) > 0:
-        tick_positions = np.linspace(0, len(merged) - 1, min(max_xticks, len(merged))).astype(int)
-        ax.set_xticks(tick_positions)
-        ax.set_xticklabels([str(merged["date"].iloc[i]) for i in tick_positions], rotation=45, ha="right")
-    ax.set_title("v0 vs v1 Repeat-Mean Portfolio Value (MVO excluded)")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Portfolio Value (initial = 1.0)")
+    set_month_xticklabels(ax, merged["date"].tolist(), max_xticks=14)
+    ax.set_title(f"{baseline_name} vs {target_name} Repeat-Mean Portfolio Value (MVO excluded)")
+    set_axis_labels_horizontal(ax, "Date", "Portfolio Value (initial = 1.0)", ylabel_pad=85)
     ax.legend()
     plt.tight_layout()
     fig.savefig(compare_dir / "compare_portfolio_value.png", dpi=150, bbox_inches="tight")
@@ -619,8 +684,16 @@ def compare_latest_v0_v1() -> None:
         except Exception:
             pass
 
-    print(f"compare_v0_v1 saved to: {compare_dir}")
-
+    config_payload = {
+        "compare_type": f"v0_vs_{target_reward_type}",
+        "v0_rolling_root": str(root_v0),
+        "target_reward_type": target_reward_type,
+        "target_rolling_root": str(root_target),
+        "compare_dir": str(compare_dir),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    save_json(compare_dir / "compare_config.json", config_payload)
+    print(f"compare_v0_{target_reward_type} saved to: {compare_dir}")
 
 # =====================================================
 # 5. Main
@@ -730,8 +803,8 @@ if __name__ == "__main__":
         if AUTO_COMPARE_LATEST:
             compare_latest_v0_v1()
         else:
-            print("compare_latest_v0_v1 skipped: AUTO_COMPARE_LATEST=False。")
-            print("若要指定 v0/v1 資料夾比較，請執行 examples/Compare_V0_V1_Manual.py。")
+            print("compare_latest_v0_target skipped: AUTO_COMPARE_LATEST=False。")
+            print("若要指定 v0 與任一 reward 版本資料夾比較，請執行 examples/Compare_V0_V1_Manual.py。")
 
         print("🎉 Rolling Window 重複實驗全部執行完畢！")
         print(f"結果總資料夾：{rolling_root}")

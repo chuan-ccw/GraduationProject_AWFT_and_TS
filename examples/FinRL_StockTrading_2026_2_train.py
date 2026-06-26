@@ -68,6 +68,36 @@ def get_reward_scaling(reward_type: str) -> float:
 
 REWARD_SCALING = get_reward_scaling(REWARD_TYPE)
 
+REWARD_DISPLAY_NAMES = {
+    "v0": "original_reward",
+    "original": "original_reward",
+    "finrl_original": "original_reward",
+    "v1": "buy_low_sell_high_reward",
+    "our_reward_v1": "buy_low_sell_high_reward",
+    "v2": "future_day_reward",
+    "reward_v2": "future_day_reward",
+    "future_day_return": "future_day_reward",
+    "v3": "future_avg_reward",
+    "reward_v3": "future_avg_reward",
+    "future_avg_return": "future_avg_reward",
+}
+
+
+def reward_display_name(reward_type: str | None) -> str:
+    """Return the display name used in plots instead of v0/v1/v2/v3."""
+    key = str(reward_type or "").strip().lower()
+    if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
+        key = key[len("reward_"):]
+    return REWARD_DISPLAY_NAMES.get(key, str(reward_type or ""))
+
+
+def set_axis_labels_horizontal(ax, xlabel: str | None = None, ylabel: str | None = None, ylabel_pad: int = 65) -> None:
+    """Keep x-axis label horizontal, but keep y-axis label in the default vertical style."""
+    if xlabel is not None:
+        ax.set_xlabel(xlabel, rotation=0)
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
+
 random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 try:
@@ -202,13 +232,14 @@ def save_sb3_training_reward_curve(agent_name: str) -> None:
         label=f"Smoothed reward mean (window={smooth_window})",
     )
 
-    ax.set_title(f"Training Reward Convergence Curve - {agent_name.upper()} ({REWARD_TYPE})")
-    ax.set_xlabel("Training timestep")
-    ax.set_ylabel("Mean episode reward × 1e6")
+    ax.set_title(f"Training Reward Convergence Curve - {agent_name.upper()} ({reward_display_name(REWARD_TYPE)})")
+    set_axis_labels_horizontal(ax, "Training timestep", "Mean episode reward × 1e6", ylabel_pad=75)
     ax.grid(True, alpha=0.25)
     ax.legend()
     fig.tight_layout()
     fig.savefig(png_path, dpi=150, bbox_inches="tight")
+    if agent_name.lower() == "ppo":
+        fig.savefig(OUTPUT_DIR / "training_reward_curve_ppo.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     print(f"SB3 training reward curve saved to {csv_path}")
@@ -239,9 +270,9 @@ def plot_train_eval_reward_curve(rewards, plot_path, agent_name):
 
     plt.figure(figsize=(14, 5))
     plt.plot(plot_df["env_step"], plot_df["cumulative_reward"], linewidth=1.8)
-    plt.title(f"Train Evaluation Cumulative Reward by Environment Step - {agent_name.upper()}")
-    plt.xlabel("Environment Step")
-    plt.ylabel("Cumulative Reward")
+    ax = plt.gca()
+    ax.set_title(f"Train Evaluation Cumulative Reward by Environment Step - {agent_name.upper()} ({reward_display_name(REWARD_TYPE)})")
+    set_axis_labels_horizontal(ax, "Environment Step", "Cumulative Reward", ylabel_pad=65)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(plot_path, dpi=300)

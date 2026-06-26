@@ -73,6 +73,36 @@ def get_reward_scaling(reward_type: str) -> float:
 
 REWARD_SCALING = get_reward_scaling(REWARD_TYPE)
 
+REWARD_DISPLAY_NAMES = {
+    "v0": "original_reward",
+    "original": "original_reward",
+    "finrl_original": "original_reward",
+    "v1": "buy_low_sell_high_reward",
+    "our_reward_v1": "buy_low_sell_high_reward",
+    "v2": "future_day_reward",
+    "reward_v2": "future_day_reward",
+    "future_day_return": "future_day_reward",
+    "v3": "future_avg_reward",
+    "reward_v3": "future_avg_reward",
+    "future_avg_return": "future_avg_reward",
+}
+
+
+def reward_display_name(reward_type: str | None) -> str:
+    """Return the display name used in plots instead of v0/v1/v2/v3."""
+    key = str(reward_type or "").strip().lower()
+    if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
+        key = key[len("reward_"):]
+    return REWARD_DISPLAY_NAMES.get(key, str(reward_type or ""))
+
+
+def set_axis_labels_horizontal(ax, xlabel: str | None = None, ylabel: str | None = None, ylabel_pad: int = 65) -> None:
+    """Keep x-axis label horizontal, but keep y-axis label in the default vertical style."""
+    if xlabel is not None:
+        ax.set_xlabel(xlabel, rotation=0)
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
+
 # %% Part 0. Create output folder
 
 if EXPERIMENT_DIR:
@@ -114,6 +144,40 @@ save_config(
 )
 
 today_str = datetime.now().strftime("%m%d")
+
+
+def format_yyyy_mm(value) -> str:
+    """Format any date-like value as YYYY-MM for plot x-axis labels.
+
+    This avoids matplotlib/pandas auto labels such as YYYY/MM/DD or full YYYY-MM-DD.
+    If the value is not date-like, keep the original text.
+    """
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.notna(ts):
+        return ts.strftime("%Y-%m")
+    text = str(value)
+    # Common fallback for strings such as 2025/1/03 or 2025-01-03.
+    match = __import__("re").search(r"(\d{4})[-/](\d{1,2})", text)
+    if match:
+        return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}"
+    return text
+
+
+def make_month_tick_positions(length: int, max_xticks: int = 12) -> np.ndarray:
+    if length <= 0:
+        return np.array([], dtype=int)
+    return np.linspace(0, length - 1, min(max_xticks, length)).astype(int)
+
+
+def set_month_xticklabels(ax, dates, max_xticks: int = 12) -> None:
+    """Use YYYY-MM labels on an axis whose x values are 0..N-1."""
+    positions = make_month_tick_positions(len(dates), max_xticks=max_xticks)
+    if len(positions) == 0:
+        return
+    labels = [format_yyyy_mm(dates[i]) for i in positions]
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels, rotation=0, ha="center")
+
 
 # %% Part 1. Load data
 
@@ -221,7 +285,10 @@ def save_agent_diagnostics(
     # Backtest stage is for trade-period actions, holdings, and portfolio value.
     # Reward curve is saved in FinRL_StockTrading_2026_2_train.py, because
     # reward analysis should correspond to the training window.
-    plot_holdings_heatmap(holdings, OUTPUT_DIR / f"holdings_heatmap_{suffix}.png", agent_name)
+    holdings_heatmap_path = OUTPUT_DIR / f"holdings_heatmap_{suffix}.png"
+    plot_holdings_heatmap(holdings, holdings_heatmap_path, agent_name)
+    if agent_name.lower() == "ppo" and holdings_heatmap_path.exists():
+        (OUTPUT_DIR / "holdings_heatmap_ppo.png").write_bytes(holdings_heatmap_path.read_bytes())
 
     print(f"Actions saved to {actions_path}")
     print(f"Holdings saved to {holdings_path}")
@@ -243,7 +310,7 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
         holdings = holdings.copy()
         holdings.insert(0, "date", np.arange(len(holdings)))
 
-    dates = holdings["date"].astype(str).tolist()
+    dates = holdings["date"].tolist()
 
     cash = holdings[["cash"]].T.astype(float) if "cash" in holdings.columns else pd.DataFrame()
     cash_after_sell = holdings["cash_after_sell"].astype(float) if "cash_after_sell" in holdings.columns else None
@@ -252,11 +319,7 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
     stocks = holdings.drop(columns=["date", "cash", "cash_after_sell", "cash_after_buy"], errors="ignore").T.astype(float)
 
     max_xticks = 12
-    tick_positions = (
-        np.linspace(0, len(dates) - 1, min(max_xticks, len(dates))).astype(int)
-        if len(dates) > 0
-        else np.array([], dtype=int)
-    )
+    tick_positions = make_month_tick_positions(len(dates), max_xticks=max_xticks)
 
     def money_formatter(x, pos):
         abs_x = abs(x)
@@ -293,9 +356,9 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
         )
         ax_cash.set_yticks([0])
         ax_cash.set_yticklabels(["cash"])
-        ax_cash.set_ylabel("Cash", labelpad=12)
+        ax_cash.set_ylabel("Cash")
         cbar_cash = fig.colorbar(cash_img, cax=cax_cash, orientation="vertical")
-        cbar_cash.set_label("Cash balance", labelpad=10)
+        cbar_cash.set_label("Cash balance")
         cbar_cash.ax.yaxis.set_major_formatter(FuncFormatter(money_formatter))
         cbar_cash.ax.tick_params(labelsize=9)
 
@@ -314,7 +377,7 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
             ax_cash_line.yaxis.set_major_formatter(FuncFormatter(money_formatter))
             ax_cash_line.grid(True, axis="y", alpha=0.25)
             ax_cash_line.set_xlim(-0.5, max(len(dates) - 0.5, 0.5))
-            ax_cash_line.set_title(f"Holdings Heatmap - {agent_name.upper()} ({REWARD_TYPE})", pad=8)
+            ax_cash_line.set_title(f"Holdings Heatmap - {agent_name.upper()} ({reward_display_name(REWARD_TYPE)})", pad=8)
             ax_cash_line.text(
                 0.995,
                 0.92,
@@ -343,7 +406,7 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
         ax_stock.set_yticklabels(stocks.index)
         ax_stock.set_ylabel("Stocks")
         cbar_stock = fig.colorbar(stock_img, cax=cax_stock, orientation="vertical")
-        cbar_stock.set_label("Number of shares", labelpad=10)
+        cbar_stock.set_label("Number of shares")
         cbar_stock.ax.yaxis.set_major_locator(MaxNLocator(nbins=7, integer=True))
         cbar_stock.ax.tick_params(labelsize=9)
     else:
@@ -353,12 +416,12 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
 
     if len(tick_positions) > 0:
         ax_stock.set_xticks(tick_positions)
-        ax_stock.set_xticklabels([dates[i] for i in tick_positions], rotation=45, ha="right")
+        ax_stock.set_xticklabels([format_yyyy_mm(dates[i]) for i in tick_positions], rotation=0, ha="center")
     plt.setp(ax_cash_line.get_xticklabels(), visible=False)
     plt.setp(ax_cash.get_xticklabels(), visible=False)
     ax_cash_line.tick_params(axis="x", length=0)
     ax_cash.tick_params(axis="x", length=0)
-    ax_stock.set_xlabel("Date")
+    ax_stock.set_xlabel("Date", rotation=0)
 
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -367,16 +430,17 @@ def plot_reward_curve(rewards: pd.DataFrame, out_path: Path, agent_name: str) ->
     if rewards.empty:
         return
     plt.figure(figsize=(15, 5))
-    x = rewards["date"].astype(str) if "date" in rewards.columns else np.arange(len(rewards))
+    dates = rewards["date"].tolist() if "date" in rewards.columns else list(range(len(rewards)))
+    x = np.arange(len(rewards))
     y = rewards["cumulative_reward_unscaled"]
     plt.plot(x, y)
     max_xticks = 12
     if len(rewards) > 0:
-        tick_positions = np.linspace(0, len(rewards) - 1, min(max_xticks, len(rewards))).astype(int)
-        plt.xticks(tick_positions, [str(x.iloc[i]) for i in tick_positions], rotation=45, ha="right")
-    plt.title(f"Cumulative Reward Curve - {agent_name.upper()} ({REWARD_TYPE})")
-    plt.xlabel("Date")
-    plt.ylabel("Cumulative reward, unscaled")
+        tick_positions = make_month_tick_positions(len(rewards), max_xticks=max_xticks)
+        plt.xticks(tick_positions, [format_yyyy_mm(dates[i]) for i in tick_positions], ha="right")
+    ax = plt.gca()
+    ax.set_title(f"Cumulative Reward Curve - {agent_name.upper()} ({reward_display_name(REWARD_TYPE)})")
+    set_axis_labels_horizontal(ax, "Date", "Cumulative reward, unscaled", ylabel_pad=80)
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close()
@@ -487,15 +551,20 @@ print(f"\nBacktest results saved to {backtest_csv_path}")
 
 # %% Part 7. Plot portfolio value
 
-plt.rcParams["figure.figsize"] = (15, 5)
-plt.figure()
-result.plot()
-plt.title("Portfolio Value Over Time")
-plt.xlabel("Date")
-plt.ylabel("Portfolio Value ($)")
+fig, ax = plt.subplots(figsize=(15, 5))
+x = np.arange(len(result))
+for col in result.columns:
+    series = pd.to_numeric(result[col], errors="coerce")
+    if series.notna().any():
+        ax.plot(x, series, label=col)
+ax.set_title("Portfolio Value Over Time")
+set_axis_labels_horizontal(ax, "Date", "Portfolio Value ($)", ylabel_pad=65)
+set_month_xticklabels(ax, list(result.index), max_xticks=12)
+ax.legend()
+fig.tight_layout()
 plot_path = OUTPUT_DIR / f"backtest_result_{REWARD_TYPE}_{TRADE_START_DATE}_to_{TRADE_END_DATE}_{today_str}.png"
-plt.savefig(plot_path, dpi=150, bbox_inches="tight")
-plt.close()
+fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+plt.close(fig)
 print(f"\nPlot saved to {plot_path}")
 
 # %% Part 8. Backtest summary for rolling aggregation
