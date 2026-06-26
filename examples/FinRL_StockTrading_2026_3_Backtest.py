@@ -210,6 +210,64 @@ def set_month_xticklabels(ax, dates, max_xticks: int = 12) -> None:
     ax.set_xticklabels(labels, rotation=0, ha="center")
 
 
+def build_dji_baseline(trade_dates, initial_amount: float = 1_000_000.0) -> pd.Series:
+    """Download and align DJI close prices to the provided trade dates."""
+    trade_index = pd.Index([str(x)[:10] for x in trade_dates], name="date")
+    if len(trade_index) == 0:
+        return pd.Series(dtype=float, name="dji")
+
+    try:
+        import yfinance as yf
+
+        start_ts = pd.to_datetime(trade_index[0], errors="coerce") - pd.Timedelta(days=7)
+        end_ts = pd.to_datetime(trade_index[-1], errors="coerce") + pd.Timedelta(days=7)
+        df_dji = yf.download(
+            "^DJI",
+            start=start_ts.strftime("%Y-%m-%d"),
+            end=end_ts.strftime("%Y-%m-%d"),
+            progress=False,
+            auto_adjust=False,
+        )
+        if df_dji is None or df_dji.empty:
+            raise ValueError("empty yfinance result")
+
+        close = None
+        if isinstance(df_dji.columns, pd.MultiIndex):
+            for candidate in ("Close", "Adj Close"):
+                level0 = [str(x) for x in df_dji.columns.get_level_values(0)]
+                if candidate in level0:
+                    sub = df_dji.xs(candidate, axis=1, level=0)
+                    close = sub.iloc[:, 0] if isinstance(sub, pd.DataFrame) else sub
+                    break
+        else:
+            for candidate in ["Close", "Adj Close", "close", "adj close"]:
+                if candidate in df_dji.columns:
+                    close = df_dji[candidate]
+                    break
+
+        if close is None:
+            raise ValueError(f"cannot find Close column, columns={list(df_dji.columns)}")
+
+        close = pd.to_numeric(close, errors="coerce").dropna()
+        if close.empty:
+            raise ValueError("DJI close series is empty after numeric conversion")
+
+        close.index = pd.Index(pd.to_datetime(close.index, errors="coerce").strftime("%Y-%m-%d"), name="date")
+        close = close[~close.index.duplicated(keep="last")]
+
+        aligned = close.reindex(trade_index).ffill().bfill()
+        valid = aligned.dropna()
+        if valid.empty:
+            raise ValueError("DJI series is empty after reindex to trade dates")
+
+        normalized = aligned / float(valid.iloc[0]) * float(initial_amount)
+        normalized.name = "dji"
+        return normalized
+    except Exception as exc:
+        print(f"DJI baseline failed: {exc}")
+        return pd.Series(index=trade_index, data=np.nan, name="dji")
+
+
 # %% Part 1. Load data
 
 train = pd.read_csv(TRAIN_DATA_PATH)
@@ -566,24 +624,8 @@ except Exception as exc:
 
 # %% Part 5. DJIA index baseline
 
-try:
-    import yfinance as yf
-
-    df_dji = yf.download("^DJI", start=TRADE_START_DATE, end=TRADE_END_DATE)
-    df_dji = df_dji[["Close"]].reset_index()
-    df_dji.columns = ["date", "close"]
-    df_dji["date"] = df_dji["date"].astype(str)
-    fst_day = df_dji["close"].iloc[0]
-    dji = pd.merge(
-        df_dji["date"],
-        df_dji["close"].div(fst_day).mul(1000000),
-        how="outer",
-        left_index=True,
-        right_index=True,
-    ).set_index("date")
-except Exception as exc:
-    print(f"DJI baseline failed: {exc}")
-    dji = pd.DataFrame(index=TradeData.index, data={"close": np.nan})
+trade_dates_for_dji = list(pd.Index(trade.index.unique()).astype(str))
+dji = build_dji_baseline(trade_dates_for_dji, initial_amount=1_000_000.0).to_frame(name="dji")
 
 # %% Part 6. Compare results
 
@@ -606,7 +648,7 @@ result = pd.DataFrame(
         "td3": df_result_td3["account_value"] if if_using_td3 else None,
         "sac": df_result_sac["account_value"] if if_using_sac else None,
         "mvo": MVO_result["Mean Var"],
-        "dji": dji["close"],
+        "dji": dji["dji"],
     }
 )
 
@@ -625,8 +667,8 @@ for col in result.columns:
     series = pd.to_numeric(result[col], errors="coerce")
     if series.notna().any():
         ax.plot(x, series, label=col)
-ax.set_title("Portfolio Value Over Time")
-set_axis_labels_horizontal(ax, "Date", "Portfolio Value ($)", ylabel_pad=65)
+ax.set_title("Asset Allocation Over Time")
+set_axis_labels_horizontal(ax, "Date", "Asset Allocation ($)", ylabel_pad=65)
 set_month_xticklabels(ax, list(result.index), max_xticks=12)
 ax.legend()
 fig.tight_layout()

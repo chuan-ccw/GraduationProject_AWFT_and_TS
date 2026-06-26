@@ -446,7 +446,7 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_ta
         min_v = pd.to_numeric(merged[min_col], errors="coerce") if min_col in merged.columns else mean
         max_v = pd.to_numeric(merged[max_col], errors="coerce") if max_col in merged.columns else mean
         ret = _strategy_return_percent(mean)
-        ax.fill_between(x, min_v, max_v, color=color, alpha=0.14, label=f"{label} range")
+        ax.fill_between(x, min_v, max_v, color=color, alpha=0.14)
         ax.plot(x, mean, color=color, linewidth=2.2, label=f"{label} mean ({ret:.2f}%)")
 
     add_strategy("v0", "blue", baseline_name)
@@ -458,22 +458,12 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_ta
             ret = _strategy_return_percent(dji)
             ax.plot(x, dji, color="tab:green", linewidth=1.8, label=f"DJI ({ret:.2f}%)")
 
-    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1, label="portfolio value = 1.0")
+    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1)
     set_month_xticklabels(ax, merged["date"].tolist(), max_xticks=MAX_XTICKS)
 
     title_mode = "Continuous 5-Year Test" if compare_data_mode in {"continuous", "continuous_5y", "continuous5y"} else "Repeat-Mean"
-    ax.set_title(f"{baseline_name} vs {target_name} {title_mode} Portfolio Value")
-    set_axis_labels_horizontal(ax, "Date", "Normalized Portfolio Value (initial = 1.0)", ylabel_pad=95)
-    ax.text(
-        0.01,
-        0.02,
-        f"{baseline_name}: {root_v0.name}\n{target_name}: {root_target.name}",
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=9,
-        bbox=dict(boxstyle="round,pad=0.35", facecolor="white", alpha=0.75, edgecolor="none"),
-    )
+    ax.set_title(f"{baseline_name} vs {target_name} {title_mode} Asset Allocation")
+    set_axis_labels_horizontal(ax, "Date", "Asset Allocation (initial = 1.0)", ylabel_pad=95)
     ax.legend()
     plt.tight_layout()
     fig.savefig(compare_dir / "compare_portfolio_value.png", dpi=150, bbox_inches="tight")

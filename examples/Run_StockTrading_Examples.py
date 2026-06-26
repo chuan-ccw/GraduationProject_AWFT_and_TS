@@ -116,6 +116,64 @@ def set_month_xticklabels(ax, dates, max_xticks: int = 12) -> None:
     ax.set_xticklabels([format_yyyy_mm(dates[i]) for i in positions], rotation=0, ha="center")
 
 
+def build_dji_baseline(trade_dates, initial_amount: float = 1_000_000.0) -> pd.Series:
+    """Download and align DJI close prices to the provided trade dates."""
+    trade_index = pd.Index([str(x)[:10] for x in trade_dates], name="date")
+    if len(trade_index) == 0:
+        return pd.Series(dtype=float, name="dji")
+
+    try:
+        import yfinance as yf
+
+        start_ts = pd.to_datetime(trade_index[0], errors="coerce") - pd.Timedelta(days=7)
+        end_ts = pd.to_datetime(trade_index[-1], errors="coerce") + pd.Timedelta(days=7)
+        df_dji = yf.download(
+            "^DJI",
+            start=start_ts.strftime("%Y-%m-%d"),
+            end=end_ts.strftime("%Y-%m-%d"),
+            progress=False,
+            auto_adjust=False,
+        )
+        if df_dji is None or df_dji.empty:
+            raise ValueError("empty yfinance result")
+
+        close = None
+        if isinstance(df_dji.columns, pd.MultiIndex):
+            for candidate in ("Close", "Adj Close"):
+                level0 = [str(x) for x in df_dji.columns.get_level_values(0)]
+                if candidate in level0:
+                    sub = df_dji.xs(candidate, axis=1, level=0)
+                    close = sub.iloc[:, 0] if isinstance(sub, pd.DataFrame) else sub
+                    break
+        else:
+            for candidate in ["Close", "Adj Close", "close", "adj close"]:
+                if candidate in df_dji.columns:
+                    close = df_dji[candidate]
+                    break
+
+        if close is None:
+            raise ValueError(f"cannot find Close column, columns={list(df_dji.columns)}")
+
+        close = pd.to_numeric(close, errors="coerce").dropna()
+        if close.empty:
+            raise ValueError("DJI close series is empty after numeric conversion")
+
+        close.index = pd.Index(pd.to_datetime(close.index, errors="coerce").strftime("%Y-%m-%d"), name="date")
+        close = close[~close.index.duplicated(keep="last")]
+
+        aligned = close.reindex(trade_index).ffill().bfill()
+        valid = aligned.dropna()
+        if valid.empty:
+            raise ValueError("DJI series is empty after reindex to trade dates")
+
+        normalized = aligned / float(valid.iloc[0]) * float(initial_amount)
+        normalized.name = "dji"
+        return normalized
+    except Exception as exc:
+        print(f"DJI baseline failed: {exc}")
+        return pd.Series(index=trade_index, data=np.nan, name="dji")
+
+
 UNUSED_COMPARE_IMAGE_NAMES = [
     "compare_report.png",
     "compare_reward_curve.png",
@@ -619,7 +677,7 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
         ppo_min = pd.to_numeric(aggregate_df["ppo_min_norm"], errors="coerce")
         ppo_max = pd.to_numeric(aggregate_df["ppo_max_norm"], errors="coerce")
         ret = (ppo_mean.dropna().iloc[-1] - 1) * 100 if ppo_mean.notna().any() else 0
-        ax.fill_between(x, ppo_min, ppo_max, color="blue", alpha=0.16, label=f"{reward_name} PPO range")
+        ax.fill_between(x, ppo_min, ppo_max, color="blue", alpha=0.16)
         ax.plot(x, ppo_mean, color="blue", linewidth=2.2, label=f"{reward_name} PPO mean ({ret:.2f}%)")
 
     if "dji_mean_norm" in aggregate_df.columns:
@@ -627,11 +685,11 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
         ret = (dji_mean.dropna().iloc[-1] - 1) * 100 if dji_mean.notna().any() else 0
         ax.plot(x, dji_mean, color="tab:green", label=f"DJI ({ret:.2f}%)")
 
-    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1, label="portfolio value = 1.0")
+    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1)
     set_month_xticklabels(ax, aggregate_df["date"].tolist(), max_xticks=12)
 
-    ax.set_title(f"Repeat Mean Portfolio Value - {reward_name} (initial = 1.0)")
-    set_axis_labels_horizontal(ax, "Date", "Portfolio Value (initial = 1.0)", ylabel_pad=85)
+    ax.set_title(f"Repeat Mean Asset Allocation - {reward_name} (initial = 1.0)")
+    set_axis_labels_horizontal(ax, "Date", "Asset Allocation (initial = 1.0)", ylabel_pad=85)
     ax.legend()
     plt.tight_layout()
 
@@ -770,7 +828,7 @@ def compare_latest_v0_target(target_reward_type: str) -> None:
         max_v = pd.to_numeric(merged[max_col], errors="coerce") if max_col in merged.columns else mean
         valid = mean.dropna()
         ret = (valid.iloc[-1] - 1) * 100 if not valid.empty else 0
-        ax.fill_between(x, min_v, max_v, color=color, alpha=0.14, label=f"{label} range")
+        ax.fill_between(x, min_v, max_v, color=color, alpha=0.14)
         ax.plot(x, mean, color=color, linewidth=2.2, label=f"{label} mean ({ret:.2f}%)")
 
     add_strategy("v0", "blue", baseline_name)
@@ -783,10 +841,10 @@ def compare_latest_v0_target(target_reward_type: str) -> None:
         ret = (valid.iloc[-1] - 1) * 100
         ax.plot(x, dji, color="tab:green", linewidth=1.8, label=f"DJI ({ret:.2f}%)")
 
-    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1, label="portfolio value = 1.0")
+    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1)
     set_month_xticklabels(ax, merged["date"].tolist(), max_xticks=14)
-    ax.set_title(f"{baseline_name} vs {target_name} Repeat-Mean Portfolio Value (MVO excluded)")
-    set_axis_labels_horizontal(ax, "Date", "Portfolio Value (initial = 1.0)", ylabel_pad=85)
+    ax.set_title(f"{baseline_name} vs {target_name} Repeat-Mean Asset Allocation (MVO excluded)")
+    set_axis_labels_horizontal(ax, "Date", "Asset Allocation (initial = 1.0)", ylabel_pad=85)
     ax.legend()
     plt.tight_layout()
     fig.savefig(compare_dir / "compare_portfolio_value.png", dpi=150, bbox_inches="tight")
@@ -1124,6 +1182,11 @@ def run_continuous_5y_test(
     result["ppo_continuous_min_norm"] = ppo_norm_df.min(axis=1)
     result["ppo_continuous_max_norm"] = ppo_norm_df.max(axis=1)
 
+    dji_series = build_dji_baseline(result["date"].tolist(), initial_amount=initial_cash)
+    if dji_series.notna().any():
+        result["dji"] = pd.to_numeric(dji_series.reindex(pd.Index(result["date"].astype(str), name="date")), errors="coerce").to_numpy()
+        result["dji_mean_norm"] = _normalize_series(result["dji"])
+
     start_date = str(result["date"].iloc[0])
     end_date = str(result["date"].iloc[-1])
 
@@ -1145,12 +1208,17 @@ def run_continuous_5y_test(
     valid = y.dropna()
     ret = (valid.iloc[-1] - 1) * 100 if not valid.empty else 0
     reward_name = reward_display_name(reward_type)
-    ax.fill_between(x, y_min, y_max, color="blue", alpha=0.16, label=f"{reward_name} PPO continuous range")
+    ax.fill_between(x, y_min, y_max, color="blue", alpha=0.16)
     ax.plot(x, y, color="blue", linewidth=2.3, label=f"{reward_name} PPO continuous mean ({ret:.2f}%)")
-    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1, label="portfolio value = 1.0")
+    if "dji_mean_norm" in result.columns:
+        dji_y = pd.to_numeric(result["dji_mean_norm"], errors="coerce")
+        dji_valid = dji_y.dropna()
+        dji_ret = (dji_valid.iloc[-1] - 1) * 100 if not dji_valid.empty else 0
+        ax.plot(x, dji_y, color="tab:green", linewidth=1.8, label=f"DJI ({dji_ret:.2f}%)")
+    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1)
     set_month_xticklabels(ax, result["date"].tolist(), max_xticks=14)
-    ax.set_title(f"Continuous 5-Year Test Portfolio Value - {reward_name}")
-    set_axis_labels_horizontal(ax, "Date", "Normalized Portfolio Value (initial = 1.0)", ylabel_pad=95)
+    ax.set_title(f"Continuous 5-Year Test Asset Allocation - {reward_name}")
+    set_axis_labels_horizontal(ax, "Date", "Asset Allocation (initial = 1.0)", ylabel_pad=95)
     ax.legend()
     plt.tight_layout()
     dated_png = out_dir / f"continuous_portfolio_value_{reward_type}_{start_date}_to_{end_date}_{date_suffix}.png"
@@ -1189,7 +1257,10 @@ def _collect_continuous_5y_series(rolling_root: Path, reward_type: str) -> pd.Da
     df = pd.read_csv(csv_path)
     if df.empty or "date" not in df.columns or "ppo_continuous_norm" not in df.columns:
         return None
-    out = df[["date", "ppo_continuous_norm"]].copy()
+    keep_cols = ["date", "ppo_continuous_norm"]
+    if "dji_mean_norm" in df.columns:
+        keep_cols.append("dji_mean_norm")
+    out = df[keep_cols].copy()
     out = out.rename(columns={"ppo_continuous_norm": f"ppo_continuous_norm_{reward_type}"})
     out.attrs["source_csvs"] = [str(csv_path)]
     return out
@@ -1259,22 +1330,19 @@ def compare_latest_continuous_v0_target(target_reward_type: str) -> None:
         y = pd.to_numeric(merged[col], errors="coerce")
         valid = y.dropna()
         ret = (valid.iloc[-1] - 1) * 100 if not valid.empty else 0
-        ax.plot(x, y, color=color, linewidth=2.3, label=f"{label} continuous ({ret:.2f}%)")
+        ax.plot(x, y, color=color, linewidth=2.3, label=f"{label} ({ret:.2f}%)")
 
-    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1, label="portfolio value = 1.0")
+    dji_candidates = ["dji_mean_norm", "dji_mean_norm_v0", f"dji_mean_norm_{target_reward_type}"]
+    dji = next((pd.to_numeric(merged[c], errors="coerce") for c in dji_candidates if c in merged.columns), pd.Series(dtype=float))
+    if not dji.empty and dji.notna().any():
+        valid = dji.dropna()
+        ret = (valid.iloc[-1] - 1) * 100
+        ax.plot(x, dji, color="tab:green", linewidth=1.8, label=f"DJI ({ret:.2f}%)")
+
+    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1)
     set_month_xticklabels(ax, merged["date"].tolist(), max_xticks=14)
-    ax.set_title(f"{baseline_name} vs {target_name} Continuous 5-Year Test Portfolio Value")
-    set_axis_labels_horizontal(ax, "Date", "Normalized Portfolio Value (initial = 1.0)", ylabel_pad=95)
-    ax.text(
-        0.01,
-        0.02,
-        f"{baseline_name}: {root_v0.name}\n{target_name}: {root_target.name}",
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=9,
-        bbox=dict(boxstyle="round,pad=0.35", facecolor="white", alpha=0.75, edgecolor="none"),
-    )
+    ax.set_title(f"{baseline_name} vs {target_name} Continuous 5-Year Test Asset Allocation")
+    set_axis_labels_horizontal(ax, "Date", "Asset Allocation (initial = 1.0)", ylabel_pad=95)
     ax.legend()
     plt.tight_layout()
     fig.savefig(compare_dir / "compare_portfolio_value.png", dpi=150, bbox_inches="tight")
@@ -1286,6 +1354,7 @@ def compare_latest_continuous_v0_target(target_reward_type: str) -> None:
     for label, col in [
         ("v0", "ppo_continuous_norm_v0"),
         (target_reward_type, f"ppo_continuous_norm_{target_reward_type}"),
+        ("dji", "dji_mean_norm"),
     ]:
         if col in merged.columns:
             valid = pd.to_numeric(merged[col], errors="coerce").dropna()

@@ -229,34 +229,11 @@ def save_sb3_training_reward_curve(agent_name: str) -> None:
         print(f"No numeric reward data available in {progress_path}")
         return
 
-    # Smooth only for visualization. Keep the original reward column in the CSV.
-    smooth_window = min(10, max(1, len(curve) // 5))
-    curve["episode_reward_mean_smooth"] = (
-        curve["episode_reward_mean"]
-        .rolling(window=smooth_window, min_periods=1)
-        .mean()
-    )
-
-    # --------------------------------------------------
-    # Scale reward only for visualization.
-    # Reason:
-    #   PPO v1 reward may be very small, for example 1e-6.
-    #   Multiplying by 1,000,000 makes the y-axis easier to read.
-    #   This does NOT change the original reward data or model training.
-    # --------------------------------------------------
-    reward_plot_scale = 1_000_000
-    curve["episode_reward_mean_scaled"] = (
-        curve["episode_reward_mean"] * reward_plot_scale
-    )
-    curve["episode_reward_mean_smooth_scaled"] = (
-        curve["episode_reward_mean_smooth"] * reward_plot_scale
-    )
-
     suffix = f"{agent_name}_{REWARD_TYPE}_seed_{RANDOM_SEED}_{today_str}"
     csv_path = OUTPUT_DIR / f"training_reward_curve_{suffix}.csv"
     png_path = OUTPUT_DIR / f"training_reward_curve_{suffix}.png"
 
-    # Save CSV with original reward, smoothed reward, and scaled values.
+    # Save CSV with the original SB3 reward curve only.
     curve.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
     # Canonical filename requested by rolling experiment folder layout.
@@ -265,26 +242,16 @@ def save_sb3_training_reward_curve(agent_name: str) -> None:
 
     fig, ax = plt.subplots(figsize=(15, 5))
 
-    # Raw reward curve: keep it lighter because RL reward is usually noisy.
     ax.plot(
         curve["training_step"],
-        curve["episode_reward_mean_scaled"],
-        linewidth=1.2,
-        alpha=0.35,
+        curve["episode_reward_mean"],
+        linewidth=1.5,
+        alpha=0.9,
         label="Episode reward mean",
     )
 
-    # Smoothed reward curve: use it to observe the convergence trend.
-    ax.plot(
-        curve["training_step"],
-        curve["episode_reward_mean_smooth_scaled"],
-        linewidth=2.4,
-        alpha=0.95,
-        label=f"Smoothed reward mean (window={smooth_window})",
-    )
-
     ax.set_title(f"Training Reward Convergence Curve - {agent_name.upper()} ({reward_display_name(REWARD_TYPE)})")
-    set_axis_labels_horizontal(ax, "Training timestep", "Mean episode reward × 1e6", ylabel_pad=75)
+    set_axis_labels_horizontal(ax, "Training timestep", "Mean episode reward", ylabel_pad=75)
     ax.grid(True, alpha=0.25)
     ax.legend()
     fig.tight_layout()
