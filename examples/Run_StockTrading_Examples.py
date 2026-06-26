@@ -11,6 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from stable_baselines3.common.utils import set_random_seed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -160,6 +161,10 @@ REPEAT_EXPERIMENTS = 5
 BASE_RANDOM_SEED = 42
 TRAIN_RANDOM_SEED = BASE_RANDOM_SEED + 1
 
+# False = 測試時從 PPO policy 分布抽樣，讓同一個 model 的 5 次 test 可以有差異。
+# True  = 測試時固定選最可能的 action，5 次 test 通常會完全相同。
+TEST_PREDICT_DETERMINISTIC = False
+
 # 非 rolling mode 才會用到這組日期
 TRAIN_START_DATE = "2018-01-01"
 TRAIN_END_DATE = "2020-12-31"
@@ -188,7 +193,7 @@ AUTO_COMPARE_LATEST = False
 # 連續 5 年 test：
 #   False = 保持原本 yearly reset / repeat_mean 流程。
 #   True  = rolling 結束後額外跑一次連續 test，上一個 window 的 cash/holdings 會接到下一個 window。
-RUN_CONTINUOUS_5Y_TEST = False
+RUN_CONTINUOUS_5Y_TEST = True
 
 # 若 RUN_CONTINUOUS_5Y_TEST=True，且 v0 與目前 REWARD_TYPE 都已有 continuous_5y_test 結果，
 # 可自動產生連續 5 年的 compare_portfolio_value.png。
@@ -307,6 +312,7 @@ def base_experiment_config() -> dict[str, Any]:
         "test_years": TEST_YEARS,
         "shift_years": SHIFT_YEARS,
         "repeat_experiments": REPEAT_EXPERIMENTS,
+        "test_predict_deterministic": TEST_PREDICT_DETERMINISTIC,
         "run_continuous_5y_test": RUN_CONTINUOUS_5Y_TEST,
         "auto_compare_continuous_latest": AUTO_COMPARE_CONTINUOUS_LATEST,
         "base_random_seed": BASE_RANDOM_SEED,
@@ -372,6 +378,7 @@ def build_child_environment(
     env["WINDOW_ID"] = str(window_id or "")
     env["REPEAT_INDEX"] = str(repeat_index or "")
     env["RANDOM_SEED"] = str(random_seed)
+    env["PREDICT_DETERMINISTIC"] = str(TEST_PREDICT_DETERMINISTIC)
 
     env["TRAIN_DATA_PATH"] = str(data_dir / "train_data.csv")
     env["TRADE_DATA_PATH"] = str(data_dir / "trade_data.csv")
@@ -850,11 +857,15 @@ def _run_continuous_window_ppo(
     reward_type: str,
     reward_params: dict[str, Any],
     use_carried_state: bool,
+    random_seed: int,
+    predict_deterministic: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame, float, dict[str, float], list[str]]:
     """Run one test window using carried cash/holdings as the initial portfolio."""
     from stable_baselines3 import PPO
     from finrl.config import INDICATORS
     from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+
+    set_random_seed(random_seed)
 
     trade = _load_trade_data_for_continuous(trade_data_path)
     stock_dimension = len(trade.tic.unique())
@@ -899,7 +910,7 @@ def _run_continuous_window_ppo(
     max_steps = len(env.df.index.unique()) - 1
 
     for i in range(len(env.df.index.unique())):
-        action, _states = model.predict(test_obs, deterministic=True)
+        action, _states = model.predict(test_obs, deterministic=predict_deterministic)
         test_obs, rewards_step, dones, info = test_env.step(action)
         if dones[0] or i >= max_steps - 1:
             break
@@ -942,117 +953,200 @@ def run_continuous_5y_test(
     reward_type: str,
     initial_cash: float = 1_000_000.0,
 ) -> None:
-    """Run an optional continuous test across all rolling test windows.
+    """Run repeated continuous tests across all rolling test windows.
 
-    Unlike the normal yearly repeat backtest, this function does not reset to
-    initial cash at each window. The final cash and stock holdings from window t
-    become the initial portfolio of window t+1.
+    Each repeat uses the same trained model of each window, but the continuous
+    portfolio state is reset at the beginning of that repeat. Within one repeat,
+    the final cash and stock holdings from window t become the initial portfolio
+    of window t+1.
     """
     reward_type = normalize_reward_type_for_continuous(reward_type)
     out_dir = rolling_root / CONTINUOUS_TEST_DIR_NAME
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    carried_cash = float(initial_cash)
-    carried_shares_by_tic: dict[str, float] = {}
-    account_frames: list[pd.DataFrame] = []
-    summary_rows: list[dict[str, Any]] = []
+    repeat_results: list[pd.DataFrame] = []
+    repeat_summary_rows: list[dict[str, Any]] = []
+    window_summary_rows: list[dict[str, Any]] = []
     source_rows: list[dict[str, Any]] = []
+    date_suffix = datetime.now().strftime("%m%d")
 
-    for idx, window in enumerate(windows):
-        window_dir = rolling_root / window_folder_name(window)
-        train_experiment_dir = window_dir / f"train_once_seed_{TRAIN_RANDOM_SEED}"
-        trade_data_path = train_experiment_dir / "data" / "trade_data.csv"
-        trained_model_dir = train_experiment_dir / "trained_models"
+    for repeat_index in range(1, REPEAT_EXPERIMENTS + 1):
+        test_seed = BASE_RANDOM_SEED + repeat_index
+        repeat_dir = out_dir / repeat_folder_name(repeat_index, test_seed)
+        repeat_dir.mkdir(parents=True, exist_ok=True)
 
-        if not trade_data_path.exists():
-            raise FileNotFoundError(f"找不到 trade_data.csv: {trade_data_path}")
-        if not trained_model_dir.exists():
-            raise FileNotFoundError(f"找不到 trained_models: {trained_model_dir}")
+        carried_cash = float(initial_cash)
+        carried_shares_by_tic: dict[str, float] = {}
+        account_frames: list[pd.DataFrame] = []
 
-        start_cash = carried_cash
-        start_shares = dict(carried_shares_by_tic)
-
-        account_value, holdings, carried_cash, carried_shares_by_tic, tic_order = _run_continuous_window_ppo(
-            trade_data_path=trade_data_path,
-            trained_model_dir=trained_model_dir,
-            carried_cash=carried_cash,
-            carried_shares_by_tic=carried_shares_by_tic,
-            reward_type=reward_type,
-            reward_params=REWARD_PARAMS_BY_TYPE.get(reward_type, REWARD_PARAMS),
-            use_carried_state=idx > 0,
+        print("-" * 80)
+        print(
+            f"Continuous 5-year test repeat {repeat_index:02d}, "
+            f"test seed {test_seed}, model seed {TRAIN_RANDOM_SEED}"
         )
+        print(f"Continuous Repeat Dir: {repeat_dir}")
+        print("-" * 80)
 
-        account_value = account_value.copy()
-        account_value["date"] = account_value["date"].astype(str)
-        account_value["window_id"] = window["window_id"]
-        account_value["window_folder"] = window_dir.name
-        account_value["source_trade_data"] = str(trade_data_path)
-        account_value["source_model_dir"] = str(trained_model_dir)
-        account_frames.append(account_value)
+        for idx, window in enumerate(windows):
+            window_dir = rolling_root / window_folder_name(window)
+            train_experiment_dir = window_dir / f"train_once_seed_{TRAIN_RANDOM_SEED}"
+            trade_data_path = train_experiment_dir / "data" / "trade_data.csv"
+            trained_model_dir = train_experiment_dir / "trained_models"
 
-        window_holdings_path = out_dir / f"holdings_window_{window['window_id']:02d}_{reward_type}.csv"
-        holdings.to_csv(window_holdings_path, index=False, encoding="utf-8-sig")
+            if not trade_data_path.exists():
+                raise FileNotFoundError(f"找不到 trade_data.csv: {trade_data_path}")
+            if not trained_model_dir.exists():
+                raise FileNotFoundError(f"找不到 trained_models: {trained_model_dir}")
 
-        ppo = pd.to_numeric(account_value["account_value"], errors="coerce").dropna()
-        summary_rows.append(
+            start_cash = carried_cash
+            start_shares = dict(carried_shares_by_tic)
+            window_seed = test_seed + int(window["window_id"]) * 1000
+
+            account_value, holdings, carried_cash, carried_shares_by_tic, tic_order = _run_continuous_window_ppo(
+                trade_data_path=trade_data_path,
+                trained_model_dir=trained_model_dir,
+                carried_cash=carried_cash,
+                carried_shares_by_tic=carried_shares_by_tic,
+                reward_type=reward_type,
+                reward_params=REWARD_PARAMS_BY_TYPE.get(reward_type, REWARD_PARAMS),
+                use_carried_state=idx > 0,
+                random_seed=window_seed,
+                predict_deterministic=TEST_PREDICT_DETERMINISTIC,
+            )
+
+            account_value = account_value.copy()
+            account_value["date"] = account_value["date"].astype(str)
+            account_value["repeat_index"] = repeat_index
+            account_value["random_seed"] = test_seed
+            account_value["window_seed"] = window_seed
+            account_value["window_id"] = window["window_id"]
+            account_value["window_folder"] = window_dir.name
+            account_value["source_trade_data"] = str(trade_data_path)
+            account_value["source_model_dir"] = str(trained_model_dir)
+            account_frames.append(account_value)
+
+            window_holdings_path = repeat_dir / f"holdings_window_{window['window_id']:02d}_{reward_type}.csv"
+            holdings.to_csv(window_holdings_path, index=False, encoding="utf-8-sig")
+
+            ppo = pd.to_numeric(account_value["account_value"], errors="coerce").dropna()
+            window_summary_rows.append(
+                {
+                    "repeat_index": repeat_index,
+                    "random_seed": test_seed,
+                    "window_seed": window_seed,
+                    "window_id": window["window_id"],
+                    "window_folder": window_dir.name,
+                    "test_start_date": window["trade_start_date"],
+                    "test_end_date": window["trade_end_date"],
+                    "start_cash": start_cash,
+                    "end_cash": carried_cash,
+                    "start_position_count": sum(1 for v in start_shares.values() if abs(v) > 1e-9),
+                    "end_position_count": sum(1 for v in carried_shares_by_tic.values() if abs(v) > 1e-9),
+                    "start_account_value": float(ppo.iloc[0]) if not ppo.empty else np.nan,
+                    "end_account_value": float(ppo.iloc[-1]) if not ppo.empty else np.nan,
+                    "window_return": float(ppo.iloc[-1] / ppo.iloc[0] - 1) if len(ppo) >= 2 and ppo.iloc[0] != 0 else np.nan,
+                    "trade_data": str(trade_data_path),
+                    "trained_model_dir": str(trained_model_dir),
+                    "holdings_csv": str(window_holdings_path),
+                    "predict_deterministic": TEST_PREDICT_DETERMINISTIC,
+                }
+            )
+            source_rows.append(
+                {
+                    "plot": "continuous_portfolio_value.png",
+                    "source_role": "continuous_window_test",
+                    "repeat_index": repeat_index,
+                    "random_seed": test_seed,
+                    "window_seed": window_seed,
+                    "window_id": window["window_id"],
+                    "window_folder": window_dir.name,
+                    "trade_data": str(trade_data_path),
+                    "trained_model_dir": str(trained_model_dir),
+                    "holdings_csv": str(window_holdings_path),
+                    "ticker_order": ",".join(tic_order),
+                    "predict_deterministic": TEST_PREDICT_DETERMINISTIC,
+                }
+            )
+
+        if not account_frames:
+            continue
+
+        repeat_result = pd.concat(account_frames, ignore_index=True)
+        repeat_result = repeat_result.drop_duplicates(subset=["date"], keep="last").sort_values("date").reset_index(drop=True)
+        repeat_result = repeat_result.rename(columns={"account_value": "ppo_continuous"})
+        repeat_result["ppo_continuous_norm"] = _normalize_series(repeat_result["ppo_continuous"])
+        repeat_results.append(repeat_result[["date", "ppo_continuous", "ppo_continuous_norm"]].copy())
+
+        start_date = str(repeat_result["date"].iloc[0])
+        end_date = str(repeat_result["date"].iloc[-1])
+        repeat_csv = repeat_dir / "continuous_portfolio_value.csv"
+        repeat_dated_csv = repeat_dir / f"continuous_portfolio_value_{reward_type}_{start_date}_to_{end_date}_{date_suffix}.csv"
+        repeat_result.to_csv(repeat_csv, index=False, encoding="utf-8-sig")
+        repeat_result.to_csv(repeat_dated_csv, index=False, encoding="utf-8-sig")
+
+        valid = pd.to_numeric(repeat_result["ppo_continuous_norm"], errors="coerce").dropna()
+        repeat_summary_rows.append(
             {
-                "window_id": window["window_id"],
-                "window_folder": window_dir.name,
-                "test_start_date": window["trade_start_date"],
-                "test_end_date": window["trade_end_date"],
-                "start_cash": start_cash,
-                "end_cash": carried_cash,
-                "start_position_count": sum(1 for v in start_shares.values() if abs(v) > 1e-9),
-                "end_position_count": sum(1 for v in carried_shares_by_tic.values() if abs(v) > 1e-9),
-                "start_account_value": float(ppo.iloc[0]) if not ppo.empty else np.nan,
-                "end_account_value": float(ppo.iloc[-1]) if not ppo.empty else np.nan,
-                "window_return": float(ppo.iloc[-1] / ppo.iloc[0] - 1) if len(ppo) >= 2 and ppo.iloc[0] != 0 else np.nan,
-                "trade_data": str(trade_data_path),
-                "trained_model_dir": str(trained_model_dir),
-                "holdings_csv": str(window_holdings_path),
+                "repeat_index": repeat_index,
+                "random_seed": test_seed,
+                "start_date": start_date,
+                "end_date": end_date,
+                "initial_cash": initial_cash,
+                "final_normalized_value": float(valid.iloc[-1]) if not valid.empty else np.nan,
+                "return_percent": float((valid.iloc[-1] - 1) * 100) if not valid.empty else np.nan,
+                "repeat_csv": str(repeat_csv),
+                "predict_deterministic": TEST_PREDICT_DETERMINISTIC,
             }
         )
-        source_rows.append(
-            {
-                "plot": "continuous_portfolio_value.png",
-                "source_role": "continuous_window_test",
-                "window_id": window["window_id"],
-                "window_folder": window_dir.name,
-                "trade_data": str(trade_data_path),
-                "trained_model_dir": str(trained_model_dir),
-                "holdings_csv": str(window_holdings_path),
-                "ticker_order": ",".join(tic_order),
-            }
-        )
 
-    if not account_frames:
+    if not repeat_results:
         print(f"{rolling_root} 沒有可用 window，略過 continuous 5y test。")
         return
 
-    result = pd.concat(account_frames, ignore_index=True)
-    result = result.drop_duplicates(subset=["date"], keep="last").sort_values("date").reset_index(drop=True)
-    result = result.rename(columns={"account_value": "ppo_continuous"})
+    base_dates = repeat_results[0]["date"].astype(str)
+    ppo_runs = []
+    ppo_norm_runs = []
+    for run_idx, df in enumerate(repeat_results, start=1):
+        aligned = df.set_index("date").reindex(base_dates).reset_index()
+        ppo_runs.append(pd.to_numeric(aligned["ppo_continuous"], errors="coerce").rename(f"ppo_run_{run_idx:02d}"))
+        ppo_norm_runs.append(pd.to_numeric(aligned["ppo_continuous_norm"], errors="coerce").rename(f"ppo_norm_run_{run_idx:02d}"))
+
+    ppo_df = pd.concat(ppo_runs, axis=1)
+    ppo_norm_df = pd.concat(ppo_norm_runs, axis=1)
+
+    result = pd.DataFrame({"date": base_dates})
+    result["ppo_continuous"] = ppo_df.mean(axis=1)
+    result["ppo_continuous_mean"] = result["ppo_continuous"]
+    result["ppo_continuous_min"] = ppo_df.min(axis=1)
+    result["ppo_continuous_max"] = ppo_df.max(axis=1)
     result["ppo_continuous_norm"] = _normalize_series(result["ppo_continuous"])
+    result["ppo_continuous_mean_norm"] = result["ppo_continuous_norm"]
+    result["ppo_continuous_min_norm"] = ppo_norm_df.min(axis=1)
+    result["ppo_continuous_max_norm"] = ppo_norm_df.max(axis=1)
 
     start_date = str(result["date"].iloc[0])
     end_date = str(result["date"].iloc[-1])
-    date_suffix = datetime.now().strftime("%m%d")
 
     canonical_csv = out_dir / "continuous_portfolio_value.csv"
     dated_csv = out_dir / f"continuous_portfolio_value_{reward_type}_{start_date}_to_{end_date}_{date_suffix}.csv"
     result.to_csv(canonical_csv, index=False, encoding="utf-8-sig")
     result.to_csv(dated_csv, index=False, encoding="utf-8-sig")
 
-    summary_path = out_dir / "continuous_window_summary.csv"
-    pd.DataFrame(summary_rows).to_csv(summary_path, index=False, encoding="utf-8-sig")
+    repeat_summary_path = out_dir / "continuous_repeat_summary.csv"
+    window_summary_path = out_dir / "continuous_window_summary.csv"
+    pd.DataFrame(repeat_summary_rows).to_csv(repeat_summary_path, index=False, encoding="utf-8-sig")
+    pd.DataFrame(window_summary_rows).to_csv(window_summary_path, index=False, encoding="utf-8-sig")
 
     fig, ax = plt.subplots(figsize=(16, 6))
     x = np.arange(len(result))
     y = pd.to_numeric(result["ppo_continuous_norm"], errors="coerce")
+    y_min = pd.to_numeric(result["ppo_continuous_min_norm"], errors="coerce")
+    y_max = pd.to_numeric(result["ppo_continuous_max_norm"], errors="coerce")
     valid = y.dropna()
     ret = (valid.iloc[-1] - 1) * 100 if not valid.empty else 0
     reward_name = reward_display_name(reward_type)
-    ax.plot(x, y, linewidth=2.3, label=f"{reward_name} PPO continuous ({ret:.2f}%)")
+    ax.fill_between(x, y_min, y_max, color="blue", alpha=0.16, label=f"{reward_name} PPO continuous range")
+    ax.plot(x, y, color="blue", linewidth=2.3, label=f"{reward_name} PPO continuous mean ({ret:.2f}%)")
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1, label="portfolio value = 1.0")
     set_month_xticklabels(ax, result["date"].tolist(), max_xticks=14)
     ax.set_title(f"Continuous 5-Year Test Portfolio Value - {reward_name}")
@@ -1068,7 +1162,8 @@ def run_continuous_5y_test(
     for row in source_rows:
         row["output_csv"] = str(canonical_csv)
         row["output_png"] = str(canonical_png)
-        row["summary_csv"] = str(summary_path)
+        row["repeat_summary_csv"] = str(repeat_summary_path)
+        row["window_summary_csv"] = str(window_summary_path)
     pd.DataFrame(source_rows).to_csv(out_dir / "image_source_manifest.csv", index=False, encoding="utf-8-sig")
 
     config_payload = {
@@ -1076,14 +1171,16 @@ def run_continuous_5y_test(
         "rolling_root": str(rolling_root),
         "output_dir": str(out_dir),
         "initial_cash": initial_cash,
+        "repeat_experiments": REPEAT_EXPERIMENTS,
+        "test_predict_deterministic": TEST_PREDICT_DETERMINISTIC,
         "start_date": start_date,
         "end_date": end_date,
         "carry_state": "cash_and_stock_holdings_from_previous_window",
+        "repeat_mean_source": "same_trained_models_with_stochastic_policy_sampling",
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     save_json(out_dir / "continuous_config.json", config_payload)
-    print(f"Continuous 5-year test saved to: {out_dir}")
-
+    print(f"Continuous 5-year repeat-mean test saved to: {out_dir}")
 
 def _collect_continuous_5y_series(rolling_root: Path, reward_type: str) -> pd.DataFrame | None:
     csv_path = rolling_root / CONTINUOUS_TEST_DIR_NAME / "continuous_portfolio_value.csv"

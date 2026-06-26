@@ -18,13 +18,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from stable_baselines3 import A2C, DDPG, PPO, SAC, TD3
+from stable_baselines3.common.utils import set_random_seed
 
 from finrl.agents.stablebaselines3.models import DRLAgent
 from finrl import config
 from finrl.config import INDICATORS
 from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
 from result_manager import make_experiment_dir, save_config
-from experiment_settings import env_bool, env_json, env_str
+from experiment_settings import env_bool, env_int, env_json, env_str
 
 # Runtime settings: Run_StockTrading_Examples.py can override config.py through environment variables.
 REWARD_TYPE = env_str("REWARD_TYPE", getattr(config, "REWARD_TYPE", "v0"))
@@ -41,7 +42,12 @@ TRAIN_DATA_PATH = Path(env_str("TRAIN_DATA_PATH", "train_data.csv"))
 TRADE_DATA_PATH = Path(env_str("TRADE_DATA_PATH", "trade_data.csv"))
 WINDOW_ID = env_str("WINDOW_ID", "")
 REPEAT_INDEX = env_str("REPEAT_INDEX", "")
-RANDOM_SEED = env_str("RANDOM_SEED", "")
+RANDOM_SEED = env_int("RANDOM_SEED", 0)
+PREDICT_DETERMINISTIC = env_bool("PREDICT_DETERMINISTIC", False)
+
+# Backtest uses stochastic PPO actions by default so repeated tests of the same model
+# can measure policy-sampling variation. RANDOM_SEED keeps each repeat reproducible.
+set_random_seed(RANDOM_SEED)
 
 
 def get_reward_scaling(reward_type: str) -> float:
@@ -132,6 +138,8 @@ print(f"  OUTPUT_DIR: {OUTPUT_DIR}")
 print(f"  TRAIN_DATA_PATH: {TRAIN_DATA_PATH}")
 print(f"  TRADE_DATA_PATH: {TRADE_DATA_PATH}")
 print(f"  TRAINED_MODEL_DIR: {TRAINED_MODEL_DIR}")
+print(f"  RANDOM_SEED: {RANDOM_SEED}")
+print(f"  PREDICT_DETERMINISTIC: {PREDICT_DETERMINISTIC}")
 
 save_config(
     OUTPUT_DIR,
@@ -148,6 +156,7 @@ save_config(
         "window_id": WINDOW_ID,
         "repeat_index": REPEAT_INDEX,
         "random_seed": RANDOM_SEED,
+        "predict_deterministic": PREDICT_DETERMINISTIC,
     },
 )
 
@@ -275,7 +284,7 @@ def predict_and_collect(model, agent_name: str):
     max_steps = len(env.df.index.unique()) - 1
 
     for i in range(len(env.df.index.unique())):
-        action, _states = model.predict(test_obs, deterministic=True)
+        action, _states = model.predict(test_obs, deterministic=PREDICT_DETERMINISTIC)
         test_obs, rewards_step, dones, info = test_env.step(action)
         if dones[0] or i >= max_steps - 1:
             break
@@ -324,6 +333,7 @@ def save_agent_diagnostics(
             "window_id": WINDOW_ID,
             "repeat_index": REPEAT_INDEX,
             "random_seed": RANDOM_SEED,
+            "predict_deterministic": PREDICT_DETERMINISTIC,
         }
     ]
     if agent_name.lower() == "ppo" and holdings_heatmap_path.exists():
@@ -637,6 +647,7 @@ save_image_source_manifest(
             "window_id": WINDOW_ID,
             "repeat_index": REPEAT_INDEX,
             "random_seed": RANDOM_SEED,
+            "predict_deterministic": PREDICT_DETERMINISTIC,
         }
     ]
 )
@@ -652,6 +663,7 @@ summary = {
     "window_id": WINDOW_ID,
     "repeat_index": REPEAT_INDEX,
     "random_seed": RANDOM_SEED,
+    "predict_deterministic": PREDICT_DETERMINISTIC,
 }
 
 if if_using_ppo and "ppo" in result.columns and result["ppo"].notna().any():
