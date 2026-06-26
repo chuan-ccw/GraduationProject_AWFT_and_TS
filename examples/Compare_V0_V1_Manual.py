@@ -55,13 +55,23 @@ V0_ROLLING_NAME = ""
 TARGET_ROLLING_NAME = ""
 
 # 可填 "v1" / "v2" / "v3" / "v4"；留空 = 用目前 REWARD_TYPE/config.REWARD_TYPE，再由資料夾校正。
-TARGET_REWARD_TYPE = 'v4'
-#TARGET_REWARD_TYPE = os.environ.get("TARGET_REWARD_TYPE", os.environ.get("REWARD_TYPE", getattr(config, "REWARD_TYPE", "v1")))
+TARGET_REWARD_TYPE = os.environ.get("TARGET_REWARD_TYPE", os.environ.get("REWARD_TYPE", getattr(config, "REWARD_TYPE", "v1")))
 
 # 輸出資料夾名稱。留空時自動產生 compare_v0_<target>_...。
 COMPARE_NAME = ""
 
+# 比較資料來源：
+#   "repeat_mean"   = 原本 yearly reset 的 repeat_mean 比較。
+#   "continuous_5y" = 連續 5 年 test，比較 continuous_5y_test/continuous_portfolio_value.csv。
+COMPARE_DATA_MODE = os.environ.get("COMPARE_DATA_MODE", "repeat_mean").strip().lower()
+
 MAX_XTICKS = 14
+
+UNUSED_COMPARE_IMAGE_NAMES = [
+    "compare_report.png",
+    "compare_reward_curve.png",
+    "compare_cumulative_return.png",
+]
 
 REWARD_DISPLAY_NAMES = {
     "v0": "original_reward",
@@ -246,20 +256,22 @@ def detect_reward_type_from_rolling_root(rolling_root: Path, default: str | None
 def collect_repeat_mean_series(rolling_root: Path, reward_type: str) -> pd.DataFrame:
     """Read all window repeat_mean backtest_result.csv files and concatenate them."""
     reward_type = normalize_reward_type(reward_type)
-    patterns = [
-        f"window_*/repeat_mean_{reward_type}/backtest_result.csv",
-        f"window_*/repeat_mean_{reward_type}/backtest_result_repeat_mean_{reward_type}_*.csv",
-    ]
 
-    csv_paths: list[Path] = []
-    for pattern in patterns:
-        csv_paths.extend(sorted(rolling_root.glob(pattern)))
+    # Prefer the canonical CSV because it is the stable source used by comparison plots.
+    csv_paths = sorted(rolling_root.glob(f"window_*/repeat_mean_{reward_type}/backtest_result.csv"))
+
+    # Fallback for older output folders that did not create backtest_result.csv.
+    if not csv_paths:
+        csv_paths = sorted(
+            rolling_root.glob(f"window_*/repeat_mean_{reward_type}/backtest_result_repeat_mean_{reward_type}_*.csv")
+        )
 
     if not csv_paths:
         # Last-resort fallback: if target folder was selected but reward type name changed, use any repeat_mean_* folder.
         csv_paths = sorted(rolling_root.glob("window_*/repeat_mean_*/backtest_result.csv"))
 
     frames: list[pd.DataFrame] = []
+    source_csvs: list[str] = []
     for csv_path in csv_paths:
         df = pd.read_csv(csv_path)
         if df.empty:
@@ -269,6 +281,7 @@ def collect_repeat_mean_series(rolling_root: Path, reward_type: str) -> pd.DataF
         df = df.copy()
         df["source_window"] = csv_path.parents[1].name
         df["source_csv"] = str(csv_path)
+        source_csvs.append(str(csv_path))
         frames.append(df)
 
     if not frames:
@@ -278,8 +291,48 @@ def collect_repeat_mean_series(rolling_root: Path, reward_type: str) -> pd.DataF
     if "date" not in out.columns:
         raise KeyError(f"repeat_mean_{reward_type} 的 backtest_result.csv 缺少 date 欄位")
     out = out.drop_duplicates(subset=["date"], keep="last")
-    return out.sort_values("date").reset_index(drop=True)
+    out = out.sort_values("date").reset_index(drop=True)
+    out.attrs["source_csvs"] = source_csvs
+    return out
 
+
+def collect_continuous_5y_series(rolling_root: Path, reward_type: str) -> pd.DataFrame:
+    """Read continuous 5-year test output and normalize it to compare columns."""
+    reward_type = normalize_reward_type(reward_type)
+    csv_path = rolling_root / "continuous_5y_test" / "continuous_portfolio_value.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(
+            f"{rolling_root} 裡找不到 continuous_5y_test/continuous_portfolio_value.csv。"
+            "請先在 Run_StockTrading_Examples.py 設 RUN_CONTINUOUS_5Y_TEST=True 跑連續 5 年 test。"
+        )
+
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        raise ValueError(f"{csv_path} 是空的。")
+    if "date" not in df.columns:
+        raise KeyError(f"{csv_path} 缺少 date 欄位。")
+    if "ppo_continuous_norm" not in df.columns:
+        raise KeyError(f"{csv_path} 缺少 ppo_continuous_norm 欄位。")
+
+    out = df.copy()
+    out["ppo_mean_norm"] = pd.to_numeric(out["ppo_continuous_norm"], errors="coerce")
+    out["ppo_min_norm"] = out["ppo_mean_norm"]
+    out["ppo_max_norm"] = out["ppo_mean_norm"]
+    out["source_window"] = "continuous_5y_test"
+    out["source_csv"] = str(csv_path)
+    out = out.sort_values("date").reset_index(drop=True)
+    out.attrs["source_csvs"] = [str(csv_path)]
+    return out
+
+
+def collect_compare_series(rolling_root: Path, reward_type: str, compare_data_mode: str) -> pd.DataFrame:
+    """Collect compare source according to COMPARE_DATA_MODE."""
+    mode = str(compare_data_mode or "repeat_mean").strip().lower()
+    if mode in {"continuous", "continuous_5y", "continuous5y"}:
+        return collect_continuous_5y_series(rolling_root, reward_type)
+    if mode in {"repeat", "repeat_mean", "yearly_reset"}:
+        return collect_repeat_mean_series(rolling_root, reward_type)
+    raise ValueError('COMPARE_DATA_MODE 只能是 "repeat_mean" 或 "continuous_5y"。')
 
 def _strategy_return_percent(series: pd.Series) -> float:
     valid = pd.to_numeric(series, errors="coerce").dropna()
@@ -288,17 +341,56 @@ def _strategy_return_percent(series: pd.Series) -> float:
     return (float(valid.iloc[-1]) - 1.0) * 100.0
 
 
-def make_compare_dir(root_v0: Path, root_target: Path, target_reward_type: str) -> Path:
+def cleanup_unused_compare_images(compare_dir: Path) -> None:
+    """Remove old compare image aliases that are no longer generated."""
+    for name in UNUSED_COMPARE_IMAGE_NAMES:
+        path = compare_dir / name
+        if path.exists():
+            path.unlink()
+
+
+def write_compare_source_manifest(
+    merged: pd.DataFrame,
+    compare_dir: Path,
+    root_v0: Path,
+    root_target: Path,
+    target_reward_type: str,
+    df_v0: pd.DataFrame,
+    df_target: pd.DataFrame,
+    compare_data_mode: str,
+) -> None:
+    """Record the exact CSV files used by compare_portfolio_value.png."""
+    rows: list[dict[str, object]] = []
+    for label, root, df in [
+        ("v0", root_v0, df_v0),
+        (target_reward_type, root_target, df_target),
+    ]:
+        for source_csv in df.attrs.get("source_csvs", []):
+            rows.append(
+                {
+                    "plot": "compare_portfolio_value.png",
+                    "source_role": f"{compare_data_mode}_{label}",
+                    "rolling_root": str(root),
+                    "source_csv": source_csv,
+                    "merged_rows": len(merged),
+                }
+            )
+    if rows:
+        pd.DataFrame(rows).to_csv(compare_dir / "image_source_manifest.csv", index=False, encoding="utf-8-sig")
+
+
+def make_compare_dir(root_v0: Path, root_target: Path, target_reward_type: str, compare_data_mode: str) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if COMPARE_NAME.strip():
         folder_name = _safe_name(COMPARE_NAME.strip())
     else:
         folder_name = (
-            f"compare_v0_{_safe_name(root_v0.name, 36)}"
+            f"compare_{_safe_name(compare_data_mode, 24)}_v0_{_safe_name(root_v0.name, 36)}"
             f"__{target_reward_type}_{_safe_name(root_target.name, 36)}"
             f"__{timestamp}"
         )
-    compare_root = Path(EXPERIMENT_ROOT) / f"compare_v0_{target_reward_type}"
+    suffix = "continuous5y" if compare_data_mode in {"continuous", "continuous_5y", "continuous5y"} else "repeat_mean"
+    compare_root = Path(EXPERIMENT_ROOT) / f"compare_v0_{target_reward_type}_{suffix}"
     compare_dir = compare_root / folder_name
     compare_dir.mkdir(parents=True, exist_ok=False)
     return compare_dir
@@ -338,7 +430,7 @@ def build_compare_dataframe(df_v0: pd.DataFrame, df_target: pd.DataFrame, target
     return merged
 
 
-def plot_compare(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_target: Path, target_reward_type: str) -> None:
+def plot_compare(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_target: Path, target_reward_type: str, compare_data_mode: str) -> None:
     fig, ax = plt.subplots(figsize=(16, 6))
     x = np.arange(len(merged))
     baseline_name = reward_display_name("v0")
@@ -369,7 +461,8 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_ta
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1, label="portfolio value = 1.0")
     set_month_xticklabels(ax, merged["date"].tolist(), max_xticks=MAX_XTICKS)
 
-    ax.set_title(f"{baseline_name} vs {target_name} Repeat-Mean Portfolio Value")
+    title_mode = "Continuous 5-Year Test" if compare_data_mode in {"continuous", "continuous_5y", "continuous5y"} else "Repeat-Mean"
+    ax.set_title(f"{baseline_name} vs {target_name} {title_mode} Portfolio Value")
     set_axis_labels_horizontal(ax, "Date", "Normalized Portfolio Value (initial = 1.0)", ylabel_pad=95)
     ax.text(
         0.01,
@@ -384,14 +477,11 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_ta
     ax.legend()
     plt.tight_layout()
     fig.savefig(compare_dir / "compare_portfolio_value.png", dpi=150, bbox_inches="tight")
-    fig.savefig(compare_dir / "compare_report.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
-
-    for name in ["compare_cumulative_return.png", "compare_reward_curve.png"]:
-        (compare_dir / name).write_bytes((compare_dir / "compare_portfolio_value.png").read_bytes())
+    cleanup_unused_compare_images(compare_dir)
 
 
-def write_summary(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_target: Path, target_reward_type: str) -> None:
+def write_summary(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_target: Path, target_reward_type: str, compare_data_mode: str) -> None:
     rows = []
     for label, col in [
         ("v0", "ppo_mean_norm_v0"),
@@ -420,7 +510,9 @@ def write_summary(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_t
         "v0_rolling_path": str(root_v0),
         "target_rolling_path": str(root_target),
         "compare_dir": str(compare_dir),
+        "compare_data_mode": compare_data_mode,
         "x_axis_format": "YYYY-MM",
+        "note": "compare_portfolio_value.png source depends on COMPARE_DATA_MODE; see image_source_manifest.csv.",
     }
     (compare_dir / "compare_config.json").write_text(
         json.dumps(config_payload, ensure_ascii=False, indent=2),
@@ -439,19 +531,21 @@ def main() -> None:
     if target_reward_type == "v0":
         raise ValueError("target_reward_type 偵測為 v0；compare 需要 v0 以外的版本，例如 v1/v2/v3/v4。")
 
-    df_v0 = collect_repeat_mean_series(root_v0, "v0")
-    df_target = collect_repeat_mean_series(root_target, target_reward_type)
+    df_v0 = collect_compare_series(root_v0, "v0", COMPARE_DATA_MODE)
+    df_target = collect_compare_series(root_target, target_reward_type, COMPARE_DATA_MODE)
     merged = build_compare_dataframe(df_v0, df_target, target_reward_type)
 
-    compare_dir = make_compare_dir(root_v0, root_target, target_reward_type)
+    compare_dir = make_compare_dir(root_v0, root_target, target_reward_type, COMPARE_DATA_MODE)
     merged.to_csv(compare_dir / "compare_metrics.csv", index=False, encoding="utf-8-sig")
-    plot_compare(merged, compare_dir, root_v0, root_target, target_reward_type)
-    write_summary(merged, compare_dir, root_v0, root_target, target_reward_type)
+    plot_compare(merged, compare_dir, root_v0, root_target, target_reward_type, COMPARE_DATA_MODE)
+    write_compare_source_manifest(merged, compare_dir, root_v0, root_target, target_reward_type, df_v0, df_target, COMPARE_DATA_MODE)
+    write_summary(merged, compare_dir, root_v0, root_target, target_reward_type, COMPARE_DATA_MODE)
 
     print("Manual compare finished.")
     print(f"v0 source: {root_v0}")
     print(f"target reward: {target_reward_type}")
     print(f"target source: {root_target}")
+    print(f"compare mode: {COMPARE_DATA_MODE}")
     print(f"compare output: {compare_dir}")
 
 

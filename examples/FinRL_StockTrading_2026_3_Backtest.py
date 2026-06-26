@@ -154,6 +154,20 @@ save_config(
 today_str = datetime.now().strftime("%m%d")
 
 
+def save_image_source_manifest(rows: list[dict[str, object]]) -> None:
+    """Write which data/model source each backtest image used."""
+    if not rows:
+        return
+    manifest_path = OUTPUT_DIR / "image_source_manifest.csv"
+    new_df = pd.DataFrame(rows)
+    if manifest_path.exists():
+        old_df = pd.read_csv(manifest_path)
+        new_df = pd.concat([old_df, new_df], ignore_index=True)
+    if "image" in new_df.columns:
+        new_df = new_df.drop_duplicates(subset=["image"], keep="last")
+    new_df.to_csv(manifest_path, index=False, encoding="utf-8-sig")
+
+
 def format_yyyy_mm(value) -> str:
     """Format any date-like value as YYYY-MM for plot x-axis labels.
 
@@ -295,8 +309,44 @@ def save_agent_diagnostics(
     # reward analysis should correspond to the training window.
     holdings_heatmap_path = OUTPUT_DIR / f"holdings_heatmap_{suffix}.png"
     plot_holdings_heatmap(holdings, holdings_heatmap_path, agent_name)
+    source_rows = [
+        {
+            "image": holdings_heatmap_path.name,
+            "image_path": str(holdings_heatmap_path),
+            "source_role": "current_repeat_holdings_memory",
+            "source_csv": str(holdings_path),
+            "actions_csv": str(actions_path),
+            "train_data": str(TRAIN_DATA_PATH),
+            "trade_data": str(TRADE_DATA_PATH),
+            "trained_model_dir": str(TRAINED_MODEL_DIR),
+            "stage": "backtest_repeat",
+            "reward_type": REWARD_TYPE,
+            "window_id": WINDOW_ID,
+            "repeat_index": REPEAT_INDEX,
+            "random_seed": RANDOM_SEED,
+        }
+    ]
     if agent_name.lower() == "ppo" and holdings_heatmap_path.exists():
-        (OUTPUT_DIR / "holdings_heatmap_ppo.png").write_bytes(holdings_heatmap_path.read_bytes())
+        canonical_heatmap_path = OUTPUT_DIR / "holdings_heatmap_ppo.png"
+        canonical_heatmap_path.write_bytes(holdings_heatmap_path.read_bytes())
+        source_rows.append(
+            {
+                "image": canonical_heatmap_path.name,
+                "image_path": str(canonical_heatmap_path),
+                "source_role": "current_repeat_holdings_memory",
+                "source_csv": str(holdings_path),
+                "actions_csv": str(actions_path),
+                "train_data": str(TRAIN_DATA_PATH),
+                "trade_data": str(TRADE_DATA_PATH),
+                "trained_model_dir": str(TRAINED_MODEL_DIR),
+                "stage": "backtest_repeat",
+                "reward_type": REWARD_TYPE,
+                "window_id": WINDOW_ID,
+                "repeat_index": REPEAT_INDEX,
+                "random_seed": RANDOM_SEED,
+            }
+        )
+    save_image_source_manifest(source_rows)
 
     print(f"Actions saved to {actions_path}")
     print(f"Holdings saved to {holdings_path}")
@@ -572,6 +622,24 @@ ax.legend()
 fig.tight_layout()
 plot_path = OUTPUT_DIR / f"backtest_result_{REWARD_TYPE}_{TRADE_START_DATE}_to_{TRADE_END_DATE}_{today_str}.png"
 fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+save_image_source_manifest(
+    [
+        {
+            "image": plot_path.name,
+            "image_path": str(plot_path),
+            "source_role": "current_repeat_backtest_result",
+            "source_csv": str(backtest_csv_path),
+            "train_data": str(TRAIN_DATA_PATH),
+            "trade_data": str(TRADE_DATA_PATH),
+            "trained_model_dir": str(TRAINED_MODEL_DIR),
+            "stage": "backtest_repeat",
+            "reward_type": REWARD_TYPE,
+            "window_id": WINDOW_ID,
+            "repeat_index": REPEAT_INDEX,
+            "random_seed": RANDOM_SEED,
+        }
+    ]
+)
 plt.close(fig)
 print(f"\nPlot saved to {plot_path}")
 

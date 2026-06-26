@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -114,6 +115,37 @@ def set_month_xticklabels(ax, dates, max_xticks: int = 12) -> None:
     ax.set_xticklabels([format_yyyy_mm(dates[i]) for i in positions], rotation=0, ha="center")
 
 
+UNUSED_COMPARE_IMAGE_NAMES = [
+    "compare_report.png",
+    "compare_reward_curve.png",
+    "compare_cumulative_return.png",
+]
+
+
+def is_backtest_repeat_dir(path: Path) -> bool:
+    """Return True only for real backtest repeat folders, not repeat_mean folders."""
+    return path.is_dir() and re.fullmatch(r"repeat_\d{2}_seed_\d+", path.name) is not None
+
+
+def select_backtest_result_csv(repeat_dir: Path, reward_type: str) -> Path | None:
+    """Select the backtest CSV produced by one real repeat folder."""
+    candidates = sorted(repeat_dir.glob(f"backtest_result_{reward_type}_*.csv"))
+    if not candidates:
+        candidates = sorted(repeat_dir.glob("backtest_result_*.csv"))
+    if not candidates:
+        return None
+    # If the same repeat folder was rerun, use the newest CSV instead of an older stale file.
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def cleanup_unused_compare_images(compare_dir: Path) -> None:
+    """Remove old compare image aliases that are no longer generated."""
+    for name in UNUSED_COMPARE_IMAGE_NAMES:
+        path = compare_dir / name
+        if path.exists():
+            path.unlink()
+
+
 # Rolling Window 設定
 ROLLING_WINDOW_MODE = True
 ROLLING_START_DATE = "2018-01-01"
@@ -152,6 +184,15 @@ RUN_BACKTEST = True
 # 例如 REWARD_TYPE="v2" 時，會產生 v0 vs v2；REWARD_TYPE="v4" 時，會產生 v0 vs v4。
 # 建議正式實驗設為 False，改用 examples/Compare_V0_V1_Manual.py 手動指定資料夾。
 AUTO_COMPARE_LATEST = False
+
+# 連續 5 年 test：
+#   False = 保持原本 yearly reset / repeat_mean 流程。
+#   True  = rolling 結束後額外跑一次連續 test，上一個 window 的 cash/holdings 會接到下一個 window。
+RUN_CONTINUOUS_5Y_TEST = False
+
+# 若 RUN_CONTINUOUS_5Y_TEST=True，且 v0 與目前 REWARD_TYPE 都已有 continuous_5y_test 結果，
+# 可自動產生連續 5 年的 compare_portfolio_value.png。
+AUTO_COMPARE_CONTINUOUS_LATEST = False
 
 # Agent 開關：train 和 backtest 會共用這裡的設定
 IF_USING_A2C = False
@@ -266,6 +307,8 @@ def base_experiment_config() -> dict[str, Any]:
         "test_years": TEST_YEARS,
         "shift_years": SHIFT_YEARS,
         "repeat_experiments": REPEAT_EXPERIMENTS,
+        "run_continuous_5y_test": RUN_CONTINUOUS_5Y_TEST,
+        "auto_compare_continuous_latest": AUTO_COMPARE_CONTINUOUS_LATEST,
         "base_random_seed": BASE_RANDOM_SEED,
         "train_random_seed": TRAIN_RANDOM_SEED,
         "run_data": RUN_DATA,
@@ -457,31 +500,47 @@ def _normalize_series(series: pd.Series) -> pd.Series:
 
 
 def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
-    """Create the per-window five-repeat mean folder used by v0/v1 comparison.
+    """Create the per-window repeat-mean folder used by reward comparison.
+
+    New folder layout:
+      train_once_seed_43/         -> training only, not a backtest repeat
+      repeat_01_seed_43/ ...      -> real backtest repeat folders
+      repeat_mean_v?/             -> aggregate output, must NOT be read as input
 
     Output folder:
-      repeat_mean_v0/ or repeat_mean_v1/
+      repeat_mean_v?/
         account_value.csv        -> ppo mean/min/max + dji mean, normalized columns
         backtest_result.csv      -> same content, convenient for plotting
         backtest_result_repeat_mean_*.csv/png
+        image_source_manifest.csv -> source CSVs used by the repeat-mean plot
     """
-    repeat_dirs = sorted([p for p in window_dir.iterdir() if p.is_dir() and p.name.startswith("repeat_")])
+    repeat_dirs = sorted([p for p in window_dir.iterdir() if is_backtest_repeat_dir(p)])
     if not repeat_dirs:
         return
 
     run_dfs: list[pd.DataFrame] = []
+    source_rows: list[dict[str, Any]] = []
     trade_start_date = None
     trade_end_date = None
     date_suffix = datetime.now().strftime("%m%d")
 
     for repeat_dir in repeat_dirs:
-        candidates = sorted(repeat_dir.glob("backtest_result_*.csv"))
-        if not candidates:
+        csv_path = select_backtest_result_csv(repeat_dir, reward_type)
+        if csv_path is None:
             continue
-        csv_path = candidates[0]
         df = _read_backtest_csv(csv_path)
         if df is None or "ppo" not in df.columns:
             continue
+        source_rows.append(
+            {
+                "plot": "backtest_result_repeat_mean.png",
+                "source_role": "single_backtest_repeat",
+                "source_repeat_dir": str(repeat_dir),
+                "source_csv": str(csv_path),
+                "rows": len(df),
+                "columns": ",".join(df.columns),
+            }
+        )
 
         if trade_start_date is None or trade_end_date is None:
             name = csv_path.stem
@@ -570,10 +629,20 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
     plt.tight_layout()
 
     aggregate_plot_path = mean_dir / f"backtest_result_repeat_mean_{reward_type}_{trade_start_date}_to_{trade_end_date}_{date_suffix}.png"
+    canonical_plot_path = mean_dir / "backtest_result_repeat_mean.png"
     plt.savefig(aggregate_plot_path, dpi=150, bbox_inches="tight")
-    plt.savefig(mean_dir / "backtest_result_repeat_mean.png", dpi=150, bbox_inches="tight")
+    plt.savefig(canonical_plot_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+    source_manifest = pd.DataFrame(source_rows)
+    if not source_manifest.empty:
+        source_manifest["output_csv"] = str(aggregate_csv_path)
+        source_manifest["output_png"] = str(aggregate_plot_path)
+        source_manifest["canonical_output_png"] = str(canonical_plot_path)
+        source_manifest.to_csv(mean_dir / "image_source_manifest.csv", index=False, encoding="utf-8-sig")
+
     print(f"Window repeat-mean folder saved to: {mean_dir}")
+    print(f"Repeat-mean source repeats: {len(source_rows)}")
 
 
 def _find_latest_rolling_root(reward_type: str) -> Path | None:
@@ -591,15 +660,45 @@ def _find_latest_rolling_root(reward_type: str) -> Path | None:
 
 def _collect_repeat_mean_series(rolling_root: Path, reward_type: str) -> pd.DataFrame | None:
     frames = []
+    source_csvs: list[str] = []
     for csv_path in sorted(rolling_root.glob(f"window_*/repeat_mean_{reward_type}/backtest_result.csv")):
         df = pd.read_csv(csv_path)
         if not df.empty:
+            source_csvs.append(str(csv_path))
             frames.append(df)
     if not frames:
         return None
     out = pd.concat(frames, ignore_index=True)
     out = out.drop_duplicates(subset=["date"], keep="last")
+    out.attrs["source_csvs"] = source_csvs
     return out
+
+
+def write_compare_source_manifest(
+    compare_dir: Path,
+    root_v0: Path,
+    root_target: Path,
+    target_reward_type: str,
+    df_v0: pd.DataFrame,
+    df_target: pd.DataFrame,
+) -> None:
+    """Record which repeat-mean CSV files were used by compare_portfolio_value.png."""
+    rows: list[dict[str, Any]] = []
+    for label, root, df in [
+        ("v0", root_v0, df_v0),
+        (target_reward_type, root_target, df_target),
+    ]:
+        for source_csv in df.attrs.get("source_csvs", []):
+            rows.append(
+                {
+                    "plot": "compare_portfolio_value.png",
+                    "source_role": f"repeat_mean_{label}",
+                    "rolling_root": str(root),
+                    "source_csv": source_csv,
+                }
+            )
+    if rows:
+        pd.DataFrame(rows).to_csv(compare_dir / "image_source_manifest.csv", index=False, encoding="utf-8-sig")
 
 
 def compare_latest_v0_v1() -> None:
@@ -684,16 +783,9 @@ def compare_latest_v0_target(target_reward_type: str) -> None:
     ax.legend()
     plt.tight_layout()
     fig.savefig(compare_dir / "compare_portfolio_value.png", dpi=150, bbox_inches="tight")
-    fig.savefig(compare_dir / "compare_report.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
-
-    # Lightweight aliases requested by task4.
-    for name in ["compare_cumulative_return.png", "compare_reward_curve.png"]:
-        try:
-            import shutil
-            shutil.copyfile(compare_dir / "compare_portfolio_value.png", compare_dir / name)
-        except Exception:
-            pass
+    cleanup_unused_compare_images(compare_dir)
+    write_compare_source_manifest(compare_dir, root_v0, root_target, target_reward_type, df_v0, df_target)
 
     config_payload = {
         "compare_type": f"v0_vs_{target_reward_type}",
@@ -706,8 +798,424 @@ def compare_latest_v0_target(target_reward_type: str) -> None:
     save_json(compare_dir / "compare_config.json", config_payload)
     print(f"compare_v0_{target_reward_type} saved to: {compare_dir}")
 
+
 # =====================================================
-# 5. Main
+# 5. Continuous 5-year test helpers
+# =====================================================
+
+CONTINUOUS_TEST_DIR_NAME = "continuous_5y_test"
+
+
+def _load_trade_data_for_continuous(trade_data_path: Path) -> pd.DataFrame:
+    """Load trade_data.csv with the same index format used by the backtest script."""
+    trade = pd.read_csv(trade_data_path)
+    trade = trade.set_index(trade.columns[0])
+    trade.index.names = [""]
+    return trade
+
+
+def _get_first_day_tic_order(trade: pd.DataFrame) -> list[str]:
+    """Return ticker order for the first trading day in a FinRL trade dataframe."""
+    first_day = trade.index.unique()[0]
+    first_day_rows = trade.loc[first_day]
+    if isinstance(first_day_rows, pd.Series):
+        return [str(first_day_rows["tic"])]
+    return [str(x) for x in first_day_rows["tic"].tolist()]
+
+
+def _align_shares_to_tic_order(shares_by_tic: dict[str, float], tic_order: list[str]) -> list[float]:
+    """Align carried shares to the next window's ticker order."""
+    return [float(shares_by_tic.get(str(tic), 0.0)) for tic in tic_order]
+
+
+def _make_previous_state_for_continuous(
+    cash: float,
+    aligned_shares: list[float],
+    stock_dimension: int,
+) -> list[float]:
+    """Build a previous_state whose holdings can be reused by StockTradingEnv."""
+    return (
+        [float(cash)]
+        + [0.0] * stock_dimension
+        + [float(x) for x in aligned_shares]
+        + [0.0] * (len(config.INDICATORS) * stock_dimension)
+    )
+
+
+def _run_continuous_window_ppo(
+    trade_data_path: Path,
+    trained_model_dir: Path,
+    carried_cash: float,
+    carried_shares_by_tic: dict[str, float],
+    reward_type: str,
+    reward_params: dict[str, Any],
+    use_carried_state: bool,
+) -> tuple[pd.DataFrame, pd.DataFrame, float, dict[str, float], list[str]]:
+    """Run one test window using carried cash/holdings as the initial portfolio."""
+    from stable_baselines3 import PPO
+    from finrl.config import INDICATORS
+    from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+
+    trade = _load_trade_data_for_continuous(trade_data_path)
+    stock_dimension = len(trade.tic.unique())
+    state_space = 1 + 2 * stock_dimension + len(INDICATORS) * stock_dimension
+    tic_order = _get_first_day_tic_order(trade)
+    aligned_shares = _align_shares_to_tic_order(carried_shares_by_tic, tic_order)
+
+    model_path = trained_model_dir / "agent_ppo"
+    if not model_path.with_suffix(".zip").exists() and not model_path.exists():
+        raise FileNotFoundError(f"找不到 PPO model: {model_path}.zip")
+
+    buy_cost_list = sell_cost_list = [0.001] * stock_dimension
+    previous_state = _make_previous_state_for_continuous(carried_cash, aligned_shares, stock_dimension)
+
+    env_kwargs = {
+        "hmax": 100,
+        "initial_amount": float(carried_cash),
+        "num_stock_shares": aligned_shares,
+        "buy_cost_pct": buy_cost_list,
+        "sell_cost_pct": sell_cost_list,
+        "state_space": state_space,
+        "stock_dim": stock_dimension,
+        "tech_indicator_list": INDICATORS,
+        "action_space": stock_dimension,
+        "reward_scaling": 1e-4 if normalize_reward_type_for_continuous(reward_type) == "v0" else 1.0,
+        "initial": not use_carried_state,
+        "previous_state": previous_state,
+    }
+
+    env = StockTradingEnv(
+        df=trade,
+        turbulence_threshold=70,
+        risk_indicator_col="vix",
+        reward_type=reward_type,
+        reward_params=reward_params,
+        **env_kwargs,
+    )
+
+    model = PPO.load(model_path)
+    test_env, test_obs = env.get_sb_env()
+    test_env.reset()
+    max_steps = len(env.df.index.unique()) - 1
+
+    for i in range(len(env.df.index.unique())):
+        action, _states = model.predict(test_obs, deterministic=True)
+        test_obs, rewards_step, dones, info = test_env.step(action)
+        if dones[0] or i >= max_steps - 1:
+            break
+
+    account_value = test_env.env_method(method_name="save_asset_memory")[0]
+    holdings = test_env.env_method(method_name="save_holdings_memory")[0]
+
+    if holdings.empty:
+        raise ValueError(f"{trade_data_path} 產生的 holdings 記錄是空的。")
+
+    last_holdings = holdings.iloc[-1]
+    next_cash = float(last_holdings["cash"])
+    next_shares_by_tic = {
+        str(tic): float(last_holdings[tic])
+        for tic in tic_order
+        if tic in holdings.columns
+    }
+    return account_value, holdings, next_cash, next_shares_by_tic, tic_order
+
+
+def normalize_reward_type_for_continuous(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    if text.startswith("reward_"):
+        text = text[len("reward_"):]
+    aliases = {
+        "original": "v0",
+        "finrl_original": "v0",
+        "our_reward_v1": "v1",
+        "future_day_return": "v2",
+        "future_avg_return": "v3",
+        "future_avg_delta_action_return": "v4",
+        "future_avg_delta_action_reward": "v4",
+    }
+    return aliases.get(text, text)
+
+
+def run_continuous_5y_test(
+    rolling_root: Path,
+    windows: list[dict[str, Any]],
+    reward_type: str,
+    initial_cash: float = 1_000_000.0,
+) -> None:
+    """Run an optional continuous test across all rolling test windows.
+
+    Unlike the normal yearly repeat backtest, this function does not reset to
+    initial cash at each window. The final cash and stock holdings from window t
+    become the initial portfolio of window t+1.
+    """
+    reward_type = normalize_reward_type_for_continuous(reward_type)
+    out_dir = rolling_root / CONTINUOUS_TEST_DIR_NAME
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    carried_cash = float(initial_cash)
+    carried_shares_by_tic: dict[str, float] = {}
+    account_frames: list[pd.DataFrame] = []
+    summary_rows: list[dict[str, Any]] = []
+    source_rows: list[dict[str, Any]] = []
+
+    for idx, window in enumerate(windows):
+        window_dir = rolling_root / window_folder_name(window)
+        train_experiment_dir = window_dir / f"train_once_seed_{TRAIN_RANDOM_SEED}"
+        trade_data_path = train_experiment_dir / "data" / "trade_data.csv"
+        trained_model_dir = train_experiment_dir / "trained_models"
+
+        if not trade_data_path.exists():
+            raise FileNotFoundError(f"找不到 trade_data.csv: {trade_data_path}")
+        if not trained_model_dir.exists():
+            raise FileNotFoundError(f"找不到 trained_models: {trained_model_dir}")
+
+        start_cash = carried_cash
+        start_shares = dict(carried_shares_by_tic)
+
+        account_value, holdings, carried_cash, carried_shares_by_tic, tic_order = _run_continuous_window_ppo(
+            trade_data_path=trade_data_path,
+            trained_model_dir=trained_model_dir,
+            carried_cash=carried_cash,
+            carried_shares_by_tic=carried_shares_by_tic,
+            reward_type=reward_type,
+            reward_params=REWARD_PARAMS_BY_TYPE.get(reward_type, REWARD_PARAMS),
+            use_carried_state=idx > 0,
+        )
+
+        account_value = account_value.copy()
+        account_value["date"] = account_value["date"].astype(str)
+        account_value["window_id"] = window["window_id"]
+        account_value["window_folder"] = window_dir.name
+        account_value["source_trade_data"] = str(trade_data_path)
+        account_value["source_model_dir"] = str(trained_model_dir)
+        account_frames.append(account_value)
+
+        window_holdings_path = out_dir / f"holdings_window_{window['window_id']:02d}_{reward_type}.csv"
+        holdings.to_csv(window_holdings_path, index=False, encoding="utf-8-sig")
+
+        ppo = pd.to_numeric(account_value["account_value"], errors="coerce").dropna()
+        summary_rows.append(
+            {
+                "window_id": window["window_id"],
+                "window_folder": window_dir.name,
+                "test_start_date": window["trade_start_date"],
+                "test_end_date": window["trade_end_date"],
+                "start_cash": start_cash,
+                "end_cash": carried_cash,
+                "start_position_count": sum(1 for v in start_shares.values() if abs(v) > 1e-9),
+                "end_position_count": sum(1 for v in carried_shares_by_tic.values() if abs(v) > 1e-9),
+                "start_account_value": float(ppo.iloc[0]) if not ppo.empty else np.nan,
+                "end_account_value": float(ppo.iloc[-1]) if not ppo.empty else np.nan,
+                "window_return": float(ppo.iloc[-1] / ppo.iloc[0] - 1) if len(ppo) >= 2 and ppo.iloc[0] != 0 else np.nan,
+                "trade_data": str(trade_data_path),
+                "trained_model_dir": str(trained_model_dir),
+                "holdings_csv": str(window_holdings_path),
+            }
+        )
+        source_rows.append(
+            {
+                "plot": "continuous_portfolio_value.png",
+                "source_role": "continuous_window_test",
+                "window_id": window["window_id"],
+                "window_folder": window_dir.name,
+                "trade_data": str(trade_data_path),
+                "trained_model_dir": str(trained_model_dir),
+                "holdings_csv": str(window_holdings_path),
+                "ticker_order": ",".join(tic_order),
+            }
+        )
+
+    if not account_frames:
+        print(f"{rolling_root} 沒有可用 window，略過 continuous 5y test。")
+        return
+
+    result = pd.concat(account_frames, ignore_index=True)
+    result = result.drop_duplicates(subset=["date"], keep="last").sort_values("date").reset_index(drop=True)
+    result = result.rename(columns={"account_value": "ppo_continuous"})
+    result["ppo_continuous_norm"] = _normalize_series(result["ppo_continuous"])
+
+    start_date = str(result["date"].iloc[0])
+    end_date = str(result["date"].iloc[-1])
+    date_suffix = datetime.now().strftime("%m%d")
+
+    canonical_csv = out_dir / "continuous_portfolio_value.csv"
+    dated_csv = out_dir / f"continuous_portfolio_value_{reward_type}_{start_date}_to_{end_date}_{date_suffix}.csv"
+    result.to_csv(canonical_csv, index=False, encoding="utf-8-sig")
+    result.to_csv(dated_csv, index=False, encoding="utf-8-sig")
+
+    summary_path = out_dir / "continuous_window_summary.csv"
+    pd.DataFrame(summary_rows).to_csv(summary_path, index=False, encoding="utf-8-sig")
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+    x = np.arange(len(result))
+    y = pd.to_numeric(result["ppo_continuous_norm"], errors="coerce")
+    valid = y.dropna()
+    ret = (valid.iloc[-1] - 1) * 100 if not valid.empty else 0
+    reward_name = reward_display_name(reward_type)
+    ax.plot(x, y, linewidth=2.3, label=f"{reward_name} PPO continuous ({ret:.2f}%)")
+    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1, label="portfolio value = 1.0")
+    set_month_xticklabels(ax, result["date"].tolist(), max_xticks=14)
+    ax.set_title(f"Continuous 5-Year Test Portfolio Value - {reward_name}")
+    set_axis_labels_horizontal(ax, "Date", "Normalized Portfolio Value (initial = 1.0)", ylabel_pad=95)
+    ax.legend()
+    plt.tight_layout()
+    dated_png = out_dir / f"continuous_portfolio_value_{reward_type}_{start_date}_to_{end_date}_{date_suffix}.png"
+    canonical_png = out_dir / "continuous_portfolio_value.png"
+    fig.savefig(dated_png, dpi=150, bbox_inches="tight")
+    fig.savefig(canonical_png, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    for row in source_rows:
+        row["output_csv"] = str(canonical_csv)
+        row["output_png"] = str(canonical_png)
+        row["summary_csv"] = str(summary_path)
+    pd.DataFrame(source_rows).to_csv(out_dir / "image_source_manifest.csv", index=False, encoding="utf-8-sig")
+
+    config_payload = {
+        "reward_type": reward_type,
+        "rolling_root": str(rolling_root),
+        "output_dir": str(out_dir),
+        "initial_cash": initial_cash,
+        "start_date": start_date,
+        "end_date": end_date,
+        "carry_state": "cash_and_stock_holdings_from_previous_window",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    save_json(out_dir / "continuous_config.json", config_payload)
+    print(f"Continuous 5-year test saved to: {out_dir}")
+
+
+def _collect_continuous_5y_series(rolling_root: Path, reward_type: str) -> pd.DataFrame | None:
+    csv_path = rolling_root / CONTINUOUS_TEST_DIR_NAME / "continuous_portfolio_value.csv"
+    if not csv_path.exists():
+        return None
+    df = pd.read_csv(csv_path)
+    if df.empty or "date" not in df.columns or "ppo_continuous_norm" not in df.columns:
+        return None
+    out = df[["date", "ppo_continuous_norm"]].copy()
+    out = out.rename(columns={"ppo_continuous_norm": f"ppo_continuous_norm_{reward_type}"})
+    out.attrs["source_csvs"] = [str(csv_path)]
+    return out
+
+
+def write_continuous_compare_source_manifest(
+    compare_dir: Path,
+    root_v0: Path,
+    root_target: Path,
+    target_reward_type: str,
+    df_v0: pd.DataFrame,
+    df_target: pd.DataFrame,
+) -> None:
+    rows: list[dict[str, Any]] = []
+    for label, root, df in [
+        ("v0", root_v0, df_v0),
+        (target_reward_type, root_target, df_target),
+    ]:
+        for source_csv in df.attrs.get("source_csvs", []):
+            rows.append(
+                {
+                    "plot": "compare_portfolio_value.png",
+                    "source_role": f"continuous_5y_{label}",
+                    "rolling_root": str(root),
+                    "source_csv": source_csv,
+                }
+            )
+    if rows:
+        pd.DataFrame(rows).to_csv(compare_dir / "image_source_manifest.csv", index=False, encoding="utf-8-sig")
+
+
+def compare_latest_continuous_v0_target(target_reward_type: str) -> None:
+    """Compare latest v0 and target continuous 5-year test outputs."""
+    target_reward_type = normalize_reward_type_for_continuous(target_reward_type)
+    if not target_reward_type or target_reward_type == "v0":
+        print("continuous compare skipped: target_reward_type 是 v0，沒有非 v0 版本可比較。")
+        return
+
+    root_v0 = _find_latest_rolling_root("v0")
+    root_target = _find_latest_rolling_root(target_reward_type)
+    if root_v0 is None or root_target is None:
+        print(f"continuous compare skipped: 找不到 v0 或 {target_reward_type} 的 rolling 結果。")
+        return
+
+    df_v0 = _collect_continuous_5y_series(root_v0, "v0")
+    df_target = _collect_continuous_5y_series(root_target, target_reward_type)
+    if df_v0 is None or df_target is None:
+        print(f"continuous compare skipped: v0/{target_reward_type} 尚未產生 continuous_5y_test 資料。")
+        return
+
+    merged = pd.merge(df_v0, df_target, on="date", how="outer").sort_values("date").reset_index(drop=True)
+    compare_root = Path(EXPERIMENT_ROOT) / f"compare_v0_{target_reward_type}_continuous5y"
+    compare_dir = compare_root / datetime.now().strftime("%Y%m%d_%H%M%S")
+    compare_dir.mkdir(parents=True, exist_ok=False)
+    merged.to_csv(compare_dir / "compare_metrics.csv", index=False, encoding="utf-8-sig")
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+    x = np.arange(len(merged))
+    baseline_name = reward_display_name("v0")
+    target_name = reward_display_name(target_reward_type)
+    for col, color, label in [
+        ("ppo_continuous_norm_v0", "blue", baseline_name),
+        (f"ppo_continuous_norm_{target_reward_type}", "red", target_name),
+    ]:
+        if col not in merged.columns:
+            continue
+        y = pd.to_numeric(merged[col], errors="coerce")
+        valid = y.dropna()
+        ret = (valid.iloc[-1] - 1) * 100 if not valid.empty else 0
+        ax.plot(x, y, color=color, linewidth=2.3, label=f"{label} continuous ({ret:.2f}%)")
+
+    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1, label="portfolio value = 1.0")
+    set_month_xticklabels(ax, merged["date"].tolist(), max_xticks=14)
+    ax.set_title(f"{baseline_name} vs {target_name} Continuous 5-Year Test Portfolio Value")
+    set_axis_labels_horizontal(ax, "Date", "Normalized Portfolio Value (initial = 1.0)", ylabel_pad=95)
+    ax.text(
+        0.01,
+        0.02,
+        f"{baseline_name}: {root_v0.name}\n{target_name}: {root_target.name}",
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=9,
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="white", alpha=0.75, edgecolor="none"),
+    )
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(compare_dir / "compare_portfolio_value.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    cleanup_unused_compare_images(compare_dir)
+    write_continuous_compare_source_manifest(compare_dir, root_v0, root_target, target_reward_type, df_v0, df_target)
+
+    summary_rows = []
+    for label, col in [
+        ("v0", "ppo_continuous_norm_v0"),
+        (target_reward_type, f"ppo_continuous_norm_{target_reward_type}"),
+    ]:
+        if col in merged.columns:
+            valid = pd.to_numeric(merged[col], errors="coerce").dropna()
+            summary_rows.append(
+                {
+                    "strategy": label,
+                    "final_normalized_value": float(valid.iloc[-1]) if not valid.empty else np.nan,
+                    "return_percent": float((valid.iloc[-1] - 1) * 100) if not valid.empty else np.nan,
+                }
+            )
+    pd.DataFrame(summary_rows).to_csv(compare_dir / "compare_summary.csv", index=False, encoding="utf-8-sig")
+
+    save_json(
+        compare_dir / "compare_config.json",
+        {
+            "compare_type": f"continuous_5y_v0_vs_{target_reward_type}",
+            "v0_rolling_root": str(root_v0),
+            "target_reward_type": target_reward_type,
+            "target_rolling_root": str(root_target),
+            "compare_dir": str(compare_dir),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
+    print(f"continuous compare_v0_{target_reward_type} saved to: {compare_dir}")
+
+# =====================================================
+# 6. Main
 # =====================================================
 
 if __name__ == "__main__":
@@ -860,6 +1368,15 @@ if __name__ == "__main__":
                 write_rolling_summaries(rolling_root, summary_rows)
 
             plot_window_repeat_aggregate(window_dir, REWARD_TYPE)
+
+        if RUN_CONTINUOUS_5Y_TEST:
+            run_continuous_5y_test(rolling_root, windows, REWARD_TYPE)
+            if AUTO_COMPARE_CONTINUOUS_LATEST:
+                compare_latest_continuous_v0_target(REWARD_TYPE)
+            else:
+                print("continuous compare skipped: AUTO_COMPARE_CONTINUOUS_LATEST=False。")
+        else:
+            print("continuous 5-year test skipped: RUN_CONTINUOUS_5Y_TEST=False。")
 
         if AUTO_COMPARE_LATEST:
             compare_latest_v0_v1()

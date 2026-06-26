@@ -163,6 +163,20 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 today_str = datetime.now().strftime("%m%d")
 
 
+def save_image_source_manifest(rows: list[dict[str, object]]) -> None:
+    """Write which data source each training image used."""
+    if not rows:
+        return
+    manifest_path = OUTPUT_DIR / "image_source_manifest.csv"
+    new_df = pd.DataFrame(rows)
+    if manifest_path.exists():
+        old_df = pd.read_csv(manifest_path)
+        new_df = pd.concat([old_df, new_df], ignore_index=True)
+    if "image" in new_df.columns:
+        new_df = new_df.drop_duplicates(subset=["image"], keep="last")
+    new_df.to_csv(manifest_path, index=False, encoding="utf-8-sig")
+
+
 def _first_existing_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
     """Return the first column that exists in df."""
     for col in candidates:
@@ -275,8 +289,36 @@ def save_sb3_training_reward_curve(agent_name: str) -> None:
     ax.legend()
     fig.tight_layout()
     fig.savefig(png_path, dpi=150, bbox_inches="tight")
+    source_rows = [
+        {
+            "image": str(png_path.name),
+            "image_path": str(png_path),
+            "source_role": "sb3_training_progress",
+            "source_csv": str(progress_path),
+            "output_csv": str(csv_path),
+            "stage": "train_once",
+            "reward_type": REWARD_TYPE,
+            "random_seed": RANDOM_SEED,
+            "training_data": str(TRAIN_DATA_PATH),
+        }
+    ]
     if agent_name.lower() == "ppo":
-        fig.savefig(OUTPUT_DIR / "training_reward_curve_ppo.png", dpi=150, bbox_inches="tight")
+        canonical_png = OUTPUT_DIR / "training_reward_curve_ppo.png"
+        fig.savefig(canonical_png, dpi=150, bbox_inches="tight")
+        source_rows.append(
+            {
+                "image": canonical_png.name,
+                "image_path": str(canonical_png),
+                "source_role": "sb3_training_progress",
+                "source_csv": str(progress_path),
+                "output_csv": str(csv_path),
+                "stage": "train_once",
+                "reward_type": REWARD_TYPE,
+                "random_seed": RANDOM_SEED,
+                "training_data": str(TRAIN_DATA_PATH),
+            }
+        )
+    save_image_source_manifest(source_rows)
     plt.close(fig)
 
     print(f"SB3 training reward curve saved to {csv_path}")
@@ -313,6 +355,20 @@ def plot_train_eval_reward_curve(rewards, plot_path, agent_name):
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(plot_path, dpi=300)
+    save_image_source_manifest(
+        [
+            {
+                "image": Path(plot_path).name,
+                "image_path": str(plot_path),
+                "source_role": "train_environment_evaluation_rewards",
+                "source_csv": str(csv_path),
+                "stage": "train_once_eval",
+                "reward_type": REWARD_TYPE,
+                "random_seed": RANDOM_SEED,
+                "training_data": str(TRAIN_DATA_PATH),
+            }
+        ]
+    )
     plt.close()
 
 
