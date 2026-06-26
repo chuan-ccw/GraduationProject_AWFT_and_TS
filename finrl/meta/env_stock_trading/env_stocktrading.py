@@ -59,6 +59,7 @@ class StockTradingEnv(gym.Env):
         model_name="",
         mode="",
         iteration="",
+        terminal_skip_days: int = 0,
     ):
         self.day = day
         self.df = df
@@ -71,6 +72,13 @@ class StockTradingEnv(gym.Env):
         self.reward_scaling = reward_scaling
         self.reward_type = reward_type
         self.reward_params = reward_params or {}
+        self.terminal_skip_days = max(0, int(terminal_skip_days or 0))
+        # Default FinRL behavior stops at the last market day.
+        # For future-return rewards, training can stop earlier while still
+        # keeping the final days in df as labels for reward calculation.
+        self.terminal_day = max(1, len(self.df.index.unique()) - 1)
+        if self.terminal_skip_days > 0:
+            self.terminal_day = max(1, len(self.df.index.unique()) - self.terminal_skip_days)
         self.state_space = state_space
         self.action_space = action_space
         self.tech_indicator_list = tech_indicator_list
@@ -238,7 +246,7 @@ class StockTradingEnv(gym.Env):
         plt.close()
 
     def step(self, actions):
-        self.terminal = self.day >= len(self.df.index.unique()) - 1
+        self.terminal = self.day >= self.terminal_day
         if self.terminal:
             # print(f"Episode: {self.episode}")
             if self.make_plots:

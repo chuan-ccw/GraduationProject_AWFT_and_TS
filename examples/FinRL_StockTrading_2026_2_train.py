@@ -44,7 +44,7 @@ def get_reward_scaling(reward_type: str) -> float:
     Choose reward_scaling by reward definition.
 
     v0 is a money-difference reward, so it keeps FinRL's original 1e-4.
-    v1/v2/v3 are return-level rewards, so they should not be shrunk by 1e-4.
+    v1/v2/v3/v4 are return-level rewards, so they should not be shrunk by 1e-4.
     """
     reward_key = str(reward_type).lower()
 
@@ -60,6 +60,10 @@ def get_reward_scaling(reward_type: str) -> float:
         "v3",
         "reward_v3",
         "future_avg_return",
+        "v4",
+        "reward_v4",
+        "future_avg_delta_action_return",
+        "future_avg_delta_action_reward",
     }:
         return 1.0
 
@@ -80,15 +84,44 @@ REWARD_DISPLAY_NAMES = {
     "v3": "future_avg_reward",
     "reward_v3": "future_avg_reward",
     "future_avg_return": "future_avg_reward",
+    "v4": "future_avg_delta_action_reward",
+    "reward_v4": "future_avg_delta_action_reward",
+    "future_avg_delta_action_return": "future_avg_delta_action_reward",
+    "future_avg_delta_action_reward": "future_avg_delta_action_reward",
 }
 
 
 def reward_display_name(reward_type: str | None) -> str:
-    """Return the display name used in plots instead of v0/v1/v2/v3."""
+    """Return the display name used in plots instead of v0/v1/v2/v3/v4."""
     key = str(reward_type or "").strip().lower()
     if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
         key = key[len("reward_"):]
     return REWARD_DISPLAY_NAMES.get(key, str(reward_type or ""))
+
+
+def get_future_reward_train_skip_days(reward_type: str, reward_params: dict) -> int:
+    """Return how many final training days should be skipped as action states.
+
+    Future-return rewards need future prices inside the training period.
+    Example: n_future=5 means the last 5 training dates are kept in df as labels,
+    but the agent will not start a training step from those dates.
+    """
+    reward_key = str(reward_type or "").strip().lower()
+    future_reward_keys = {
+        "v2",
+        "reward_v2",
+        "future_day_return",
+        "v3",
+        "reward_v3",
+        "future_avg_return",
+        "v4",
+        "reward_v4",
+        "future_avg_delta_action_return",
+        "future_avg_delta_action_reward",
+    }
+    if reward_key not in future_reward_keys:
+        return 0
+    return max(0, int((reward_params or {}).get("n_future", 0)))
 
 
 def set_axis_labels_horizontal(ax, xlabel: str | None = None, ylabel: str | None = None, ylabel_pad: int = 65) -> None:
@@ -97,6 +130,9 @@ def set_axis_labels_horizontal(ax, xlabel: str | None = None, ylabel: str | None
         ax.set_xlabel(xlabel, rotation=0)
     if ylabel is not None:
         ax.set_ylabel(ylabel)
+
+
+TRAIN_TERMINAL_SKIP_DAYS = get_future_reward_train_skip_days(REWARD_TYPE, REWARD_PARAMS)
 
 random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
@@ -113,6 +149,7 @@ print("Train setting:")
 print(f"  REWARD_TYPE: {REWARD_TYPE}")
 print(f"  REWARD_PARAMS: {REWARD_PARAMS}")
 print(f"  REWARD_SCALING: {REWARD_SCALING}")
+print(f"  TRAIN_TERMINAL_SKIP_DAYS: {TRAIN_TERMINAL_SKIP_DAYS}")
 print(f"  EXPERIMENT_DIR: {EXPERIMENT_DIR}")
 print(f"  TRAIN_DATA_PATH: {TRAIN_DATA_PATH}")
 print(f"  RANDOM_SEED: {RANDOM_SEED}")
@@ -330,6 +367,32 @@ train = pd.read_csv(TRAIN_DATA_PATH)
 train = train.set_index(train.columns[0])
 train.index.names = [""]
 
+train_dates = pd.Series(train["date"].astype(str).unique())
+if TRAIN_TERMINAL_SKIP_DAYS > 0:
+    skipped_start_pos = max(0, len(train_dates) - TRAIN_TERMINAL_SKIP_DAYS)
+    last_action_pos = max(0, skipped_start_pos - 1)
+    guard_df = pd.DataFrame(
+        [
+            {
+                "reward_type": REWARD_TYPE,
+                "n_future": TRAIN_TERMINAL_SKIP_DAYS,
+                "train_start_date": train_dates.iloc[0] if not train_dates.empty else "",
+                "train_end_date_config": train_dates.iloc[-1] if not train_dates.empty else "",
+                "last_train_action_date": train_dates.iloc[last_action_pos] if not train_dates.empty else "",
+                "skipped_start_date": train_dates.iloc[skipped_start_pos] if skipped_start_pos < len(train_dates) else "",
+                "skipped_end_date": train_dates.iloc[-1] if not train_dates.empty else "",
+                "skipped_days_count": min(TRAIN_TERMINAL_SKIP_DAYS, len(train_dates)),
+                "note": "Final dates stay in df only as future labels; agent does not train actions from those dates.",
+            }
+        ]
+    )
+    guard_path = OUTPUT_DIR / "train_future_window_guard.csv"
+    guard_df.to_csv(guard_path, index=False, encoding="utf-8-sig")
+    print("Future-reward train guard enabled:")
+    print(f"  Last train action date: {guard_df.loc[0, 'last_train_action_date']}")
+    print(f"  Skipped action dates   : {guard_df.loc[0, 'skipped_start_date']} ~ {guard_df.loc[0, 'skipped_end_date']}")
+    print(f"  Guard file             : {guard_path}")
+
 stock_dimension = len(train.tic.unique())
 state_space = 1 + 2 * stock_dimension + len(INDICATORS) * stock_dimension
 print(f"Stock Dimension: {stock_dimension}, State Space: {state_space}")
@@ -348,6 +411,7 @@ env_kwargs = {
     "tech_indicator_list": INDICATORS,
     "action_space": stock_dimension,
     "reward_scaling": REWARD_SCALING,
+    "terminal_skip_days": TRAIN_TERMINAL_SKIP_DAYS,
 }
 
 e_train_gym = StockTradingEnv(

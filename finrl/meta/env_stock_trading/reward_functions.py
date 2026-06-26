@@ -272,6 +272,90 @@ def reward_v3(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     return float(np.sum(action_units[valid] * simple_returns[valid]))
 
 
+def reward_v4(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float:
+    """
+    Jason reward v4.
+
+    使用 action value 變化量與未來 n 天平均價格報酬計算 reward。
+
+    Formula:
+        R_t = sum_i delta_a(i,t) * r_avg(i,t)
+
+        delta_a(i,t) = a(i,t) - a(i,t-1)
+
+        r_avg(i,t) = (avg_p(i,t)^n - p(i,t)) / p(i,t)
+
+        avg_p(i,t)^n = 1/n * sum_{k=t+1}^{t+n} p(i,k)
+
+    其中：
+        a(i,t): 第 i 檔股票在第 t 天的 action value, range = [-1, 1]
+        delta_a(i,t): 第 i 檔股票在第 t 天相對於第 t-1 天的 action value 變化量
+        p(i,t): 第 i 檔股票在第 t 天的價格
+        avg_p(i,t)^n: 第 i 檔股票未來 n 天平均價格
+
+    Meaning:
+        If future average price is higher and action increases, reward is positive.
+        If future average price is lower and action decreases, reward is positive.
+        This encourages the model to reward correct position adjustment direction,
+        not just the absolute action direction.
+    """
+    params = params or {}
+
+    eps = params.get("eps", 1e-8)
+    n_future = int(params.get("n_future", 5))
+    price_col = params.get("price_col", "close")
+
+    current_action_units = _action_to_unit_array(ctx.raw_actions, ctx.env.hmax, eps)
+    previous_action_units = getattr(ctx.env, "_reward_v4_previous_action_units", None)
+
+    if (
+        ctx.current_day == 0
+        or previous_action_units is None
+        or len(previous_action_units) != len(current_action_units)
+    ):
+        previous_action_units = np.zeros_like(current_action_units, dtype=float)
+    else:
+        previous_action_units = np.asarray(previous_action_units, dtype=float)
+
+    delta_action_units = current_action_units - previous_action_units
+
+    # Keep current action for the next step. This must happen even when the
+    # future window is unavailable near the end of the episode.
+    ctx.env._reward_v4_previous_action_units = current_action_units.copy()
+
+    price_matrix, day_to_pos = _get_price_matrix(ctx.env, ctx.tic_list, price_col)
+
+    current_pos = day_to_pos.get(ctx.current_day)
+    if current_pos is None:
+        return 0.0
+
+    start_pos = current_pos + 1
+    end_pos = current_pos + n_future + 1
+    if end_pos > price_matrix.shape[0]:
+        return 0.0
+
+    future_window = price_matrix[start_pos:end_pos]
+    current_prices = np.asarray(ctx.current_prices_before_trade, dtype=float)
+    avg_future_prices = np.nanmean(future_window, axis=0)
+
+    future_avg_returns = (avg_future_prices - current_prices) / (current_prices + eps)
+
+    valid = (
+        np.isfinite(current_prices)
+        & np.isfinite(avg_future_prices)
+        & np.isfinite(future_avg_returns)
+        & np.isfinite(delta_action_units)
+        & np.all(np.isfinite(future_window), axis=0)
+        & (current_prices > eps)
+        & (avg_future_prices > eps)
+    )
+
+    if not np.any(valid):
+        return 0.0
+
+    return float(np.sum(delta_action_units[valid] * future_avg_returns[valid]))
+
+
 REWARD_FUNCTIONS = {
     "v0": reward_v0,
     "original": reward_v0,
@@ -287,6 +371,11 @@ REWARD_FUNCTIONS = {
     "v3": reward_v3,
     "reward_v3": reward_v3,
     "future_avg_return": reward_v3,
+
+    "v4": reward_v4,
+    "reward_v4": reward_v4,
+    "future_avg_delta_action_return": reward_v4,
+    "future_avg_delta_action_reward": reward_v4,
 }
 
 

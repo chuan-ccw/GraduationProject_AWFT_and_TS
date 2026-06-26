@@ -10,7 +10,8 @@ RESULTS_DIR = "results"
 # These are only defaults. Run_StockTrading_Examples.py can override them at runtime.
 # For reward v2: use REWARD_TYPE = "v2"
 # For reward v3: use REWARD_TYPE = "v3"
-REWARD_TYPE = "v2"
+# For reward v4: use REWARD_TYPE = "v4"
+REWARD_TYPE = "v4"
 REWARD_PARAMS = {"n_future": 5, "price_col": "close"}
 EXPERIMENT_ROOT = r"C:\Users\User\Desktop\GraduationProject\Experence_result"
 

@@ -26,8 +26,9 @@ from finrl import config
 #   "v1" = simple return + buy low score + sell high score
 #   "v2" = sum(action * future t+n day simple return)
 #   "v3" = sum(action * future n-day average simple return)
+#   "v4" = sum(delta action * future n-day average simple return)
 
-REWARD_TYPE = "v2"
+REWARD_TYPE = "v4"
 
 REWARD_PARAMS_BY_TYPE = {
     "v0": {},
@@ -41,6 +42,10 @@ REWARD_PARAMS_BY_TYPE = {
         "price_col": "close",
     },
     "v3": {
+        "n_future": 5,
+        "price_col": "close",
+    },
+    "v4": {
         "n_future": 5,
         "price_col": "close",
     },
@@ -60,11 +65,15 @@ REWARD_DISPLAY_NAMES = {
     "v3": "future_avg_reward",
     "reward_v3": "future_avg_reward",
     "future_avg_return": "future_avg_reward",
+    "v4": "future_avg_delta_action_reward",
+    "reward_v4": "future_avg_delta_action_reward",
+    "future_avg_delta_action_return": "future_avg_delta_action_reward",
+    "future_avg_delta_action_reward": "future_avg_delta_action_reward",
 }
 
 
 def reward_display_name(reward_type: str | None) -> str:
-    """Return the display name used in plots instead of v0/v1/v2/v3."""
+    """Return the display name used in plots instead of v0/v1/v2/v3/v4."""
     key = str(reward_type or "").strip().lower()
     if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
         key = key[len("reward_"):]
@@ -113,10 +122,11 @@ TRAIN_YEARS = 3
 TEST_YEARS = 1
 SHIFT_YEARS = 1
 
-# 每個 rolling window 重複實驗次數
-# 注意：repeat_01 在 window_01 ~ window_05 使用相同 seed；repeat_02 才換下一個 seed。
+# 每個 rolling window 的 backtest 重複次數
+# 注意：每個 window 只 train 一次 PPO model，train 完後再用同一個 model test 5 次。
 REPEAT_EXPERIMENTS = 5
 BASE_RANDOM_SEED = 42
+TRAIN_RANDOM_SEED = BASE_RANDOM_SEED + 1
 
 # 非 rolling mode 才會用到這組日期
 TRAIN_START_DATE = "2018-01-01"
@@ -139,7 +149,7 @@ RUN_TRAIN = True
 RUN_BACKTEST = True
 
 # 是否在 rolling 實驗結束後自動使用「最新」v0 與目前 REWARD_TYPE 產生比較圖。
-# 例如 REWARD_TYPE="v2" 時，會產生 v0 vs v2；REWARD_TYPE="v3" 時，會產生 v0 vs v3。
+# 例如 REWARD_TYPE="v2" 時，會產生 v0 vs v2；REWARD_TYPE="v4" 時，會產生 v0 vs v4。
 # 建議正式實驗設為 False，改用 examples/Compare_V0_V1_Manual.py 手動指定資料夾。
 AUTO_COMPARE_LATEST = False
 
@@ -257,6 +267,7 @@ def base_experiment_config() -> dict[str, Any]:
         "shift_years": SHIFT_YEARS,
         "repeat_experiments": REPEAT_EXPERIMENTS,
         "base_random_seed": BASE_RANDOM_SEED,
+        "train_random_seed": TRAIN_RANDOM_SEED,
         "run_data": RUN_DATA,
         "run_train": RUN_TRAIN,
         "run_backtest": RUN_BACKTEST,
@@ -723,23 +734,66 @@ if __name__ == "__main__":
         print(f"REWARD_TYPE = {REWARD_TYPE}")
         print(f"期間        = {ROLLING_START_DATE} ~ {ROLLING_END_DATE}")
         print(f"Train/Test  = {TRAIN_YEARS}y / {TEST_YEARS}y, shift {SHIFT_YEARS}y")
-        print(f"Repeats     = {REPEAT_EXPERIMENTS}")
-        print(f"Root        = {rolling_root}")
-        print("Seed 規則：同一個 repeat 在所有 windows 使用同一個 seed")
+        print(f"Backtest repeats = {REPEAT_EXPERIMENTS}")
+        print(f"Train seed       = {TRAIN_RANDOM_SEED}")
+        print(f"Root             = {rolling_root}")
+        print("流程：每個 window 只 train 一次 PPO model，train 完後再 test repeat 5 次")
         print("========================================\n")
 
         summary_rows: list[dict[str, Any]] = []
 
-        # 正確順序：repeat_01 跑完 window_01~window_05，再換 repeat_02。
-        for repeat_index in range(1, REPEAT_EXPERIMENTS + 1):
-            random_seed = BASE_RANDOM_SEED + repeat_index
-            print("#" * 80)
-            print(f"開始 repeat_{repeat_index:02d}, seed = {random_seed}")
-            print("#" * 80)
+        # 正確順序：每個 window 先 train 一次，再用同一個 model 做 5 次 backtest。
+        for window in windows:
+            window_dir = rolling_root / window_folder_name(window)
+            train_experiment_dir = window_dir / f"train_once_seed_{TRAIN_RANDOM_SEED}"
+            train_experiment_dir.mkdir(parents=True, exist_ok=True)
 
-            for window in windows:
-                window_dir = rolling_root / window_folder_name(window)
-                experiment_dir = window_dir / repeat_folder_name(repeat_index, random_seed)
+            train_config = {
+                **base_experiment_config(),
+                **window,
+                "rolling_root": str(rolling_root),
+                "window_dir": str(window_dir),
+                "experiment_dir": str(train_experiment_dir),
+                "random_seed": TRAIN_RANDOM_SEED,
+                "train_period": f"{window['train_start_year']}-{window['train_end_year']}",
+                "test_period": f"{window['test_start_year']}-{window['test_end_year']}",
+                "stage": "train_once",
+            }
+            save_json(train_experiment_dir / "experiment_config.json", train_config)
+
+            print("=" * 80)
+            print(f"Window {window['window_id']:02d}: train PPO once, seed {TRAIN_RANDOM_SEED}")
+            print(f"Train: {window['train_start_date']} ~ {window['train_end_date']}")
+            print(f"Test : {window['test_start_date']} ~ {window['test_end_date']}")
+            print(f"Train Dir: {train_experiment_dir}")
+            print("=" * 80)
+
+            train_env = build_child_environment(
+                experiment_dir=train_experiment_dir,
+                train_start_date=window["train_start_date"],
+                train_end_date=window["train_end_date"],
+                test_start_date=window["test_start_date"],
+                test_end_date=window["test_end_date"],
+                trade_start_date=window["trade_start_date"],
+                trade_end_date=window["trade_end_date"],
+                random_seed=TRAIN_RANDOM_SEED,
+                rolling_root_dir=rolling_root,
+                window_dir=window_dir,
+                repeat_index=None,
+                window_id=window["window_id"],
+            )
+
+            if RUN_DATA:
+                run_script("examples/FinRL_StockTrading_2026_1_data.py", train_env, project_root)
+            if RUN_TRAIN:
+                run_script("examples/FinRL_StockTrading_2026_2_train.py", train_env, project_root)
+
+            trained_data_dir = train_experiment_dir / "data"
+            trained_model_dir = train_experiment_dir / "trained_models"
+
+            for repeat_index in range(1, REPEAT_EXPERIMENTS + 1):
+                test_seed = BASE_RANDOM_SEED + repeat_index
+                experiment_dir = window_dir / repeat_folder_name(repeat_index, test_seed)
                 experiment_dir.mkdir(parents=True, exist_ok=True)
 
                 run_config = {
@@ -747,24 +801,26 @@ if __name__ == "__main__":
                     **window,
                     "rolling_root": str(rolling_root),
                     "window_dir": str(window_dir),
+                    "train_experiment_dir": str(train_experiment_dir),
                     "experiment_dir": str(experiment_dir),
                     "repeat_index": repeat_index,
-                    "random_seed": random_seed,
+                    "random_seed": test_seed,
+                    "train_random_seed": TRAIN_RANDOM_SEED,
                     "train_period": f"{window['train_start_year']}-{window['train_end_year']}",
                     "test_period": f"{window['test_start_year']}-{window['test_end_year']}",
+                    "stage": "backtest_repeat",
                 }
                 save_json(experiment_dir / "experiment_config.json", run_config)
 
-                print("=" * 80)
+                print("-" * 80)
                 print(
-                    f"Window {window['window_id']:02d}, repeat {repeat_index:02d}, seed {random_seed}"
+                    f"Window {window['window_id']:02d}, test repeat {repeat_index:02d}, "
+                    f"test seed {test_seed}, model seed {TRAIN_RANDOM_SEED}"
                 )
-                print(f"Train: {window['train_start_date']} ~ {window['train_end_date']}")
-                print(f"Test : {window['test_start_date']} ~ {window['test_end_date']}")
-                print(f"Dir  : {experiment_dir}")
-                print("=" * 80)
+                print(f"Backtest Dir: {experiment_dir}")
+                print("-" * 80)
 
-                child_env = build_child_environment(
+                test_env = build_child_environment(
                     experiment_dir=experiment_dir,
                     train_start_date=window["train_start_date"],
                     train_end_date=window["train_end_date"],
@@ -772,32 +828,37 @@ if __name__ == "__main__":
                     test_end_date=window["test_end_date"],
                     trade_start_date=window["trade_start_date"],
                     trade_end_date=window["trade_end_date"],
-                    random_seed=random_seed,
+                    random_seed=test_seed,
                     rolling_root_dir=rolling_root,
                     window_dir=window_dir,
                     repeat_index=repeat_index,
                     window_id=window["window_id"],
                 )
 
-                for script in scripts_to_run():
-                    run_script(script, child_env, project_root)
+                # Backtest repeat 使用同一份 data 與同一個 trained PPO model。
+                test_env["TRAIN_DATA_PATH"] = str(trained_data_dir / "train_data.csv")
+                test_env["TRADE_DATA_PATH"] = str(trained_data_dir / "trade_data.csv")
+                test_env["TRAINED_MODEL_DIR"] = str(trained_model_dir)
+
+                if RUN_BACKTEST:
+                    run_script("examples/FinRL_StockTrading_2026_3_Backtest.py", test_env, project_root)
 
                 backtest_summary = collect_backtest_summary(experiment_dir)
                 summary_rows.append(
                     {
                         "window_id": window["window_id"],
                         "repeat_index": repeat_index,
-                        "random_seed": random_seed,
+                        "random_seed": test_seed,
+                        "train_random_seed": TRAIN_RANDOM_SEED,
                         "train_period": f"{window['train_start_year']}-{window['train_end_year']}",
                         "test_period": f"{window['test_start_year']}-{window['test_end_year']}",
+                        "train_experiment_dir": str(train_experiment_dir),
                         "experiment_dir": str(experiment_dir),
                         **backtest_summary,
                     }
                 )
                 write_rolling_summaries(rolling_root, summary_rows)
 
-        for window in windows:
-            window_dir = rolling_root / window_folder_name(window)
             plot_window_repeat_aggregate(window_dir, REWARD_TYPE)
 
         if AUTO_COMPARE_LATEST:
