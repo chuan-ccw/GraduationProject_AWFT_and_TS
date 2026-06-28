@@ -210,6 +210,37 @@ def set_month_xticklabels(ax, dates, max_xticks: int = 12) -> None:
     ax.set_xticklabels(labels, rotation=0, ha="center")
 
 
+def get_trade_dates(trade_df: pd.DataFrame) -> pd.Index:
+    """Return real trading dates from the trade dataframe, not the numeric day index."""
+    if "date" in trade_df.columns:
+        raw_dates = pd.Series(trade_df["date"].astype(str)).drop_duplicates()
+    else:
+        raw_dates = pd.Series(pd.Index(trade_df.index.unique()).astype(str))
+
+    parsed = pd.to_datetime(raw_dates, errors="coerce")
+    valid = parsed.notna()
+    return pd.Index(parsed[valid].dt.strftime("%Y-%m-%d"), name="date")
+
+
+def align_account_value_to_dates(account_value: pd.DataFrame | None, trade_dates: pd.Index) -> pd.Series | None:
+    """Align one agent's account_value output to the real trade-date index."""
+    if account_value is None or account_value.empty or "account_value" not in account_value.columns:
+        return None
+
+    df = account_value.copy()
+    if "date" in df.columns:
+        parsed = pd.to_datetime(df["date"].astype(str), errors="coerce")
+        if parsed.notna().any():
+            df["date"] = parsed.dt.strftime("%Y-%m-%d")
+            series = pd.to_numeric(df.set_index("date")["account_value"], errors="coerce")
+            return series.reindex(trade_dates)
+
+    # Fallback for unexpected numeric date output: keep sequence order, but use real trade dates.
+    values = pd.to_numeric(df["account_value"], errors="coerce").reset_index(drop=True)
+    length = min(len(values), len(trade_dates))
+    return pd.Series(values.iloc[:length].to_numpy(), index=trade_dates[:length])
+
+
 def build_dji_baseline(trade_dates, initial_amount: float = 1_000_000.0) -> pd.Series:
     """Download and align DJI close prices to the provided trade dates."""
     trade_index = pd.Index([str(x)[:10] for x in trade_dates], name="date")
@@ -579,78 +610,34 @@ df_account_value_ppo, df_actions_ppo, df_holdings_ppo, df_rewards_ppo = predict_
 df_account_value_td3, df_actions_td3, _, _ = predict_and_collect(trained_td3, "td3") if if_using_td3 else (None, None, None, None)
 df_account_value_sac, df_actions_sac, _, _ = predict_and_collect(trained_sac, "sac") if if_using_sac else (None, None, None, None)
 
-# %% Part 4. Mean Variance Optimization baseline
+# %% Part 4. Baselines
 
-
-def process_df_for_mvo(df):
-    return df.pivot(index="date", columns="tic", values="close")
-
-
-def StockReturnsComputing(StockPrice, Rows, Columns):
-    StockReturn = np.zeros([Rows - 1, Columns])
-    for j in range(Columns):
-        for i in range(Rows - 1):
-            StockReturn[i, j] = ((StockPrice[i + 1, j] - StockPrice[i, j]) / StockPrice[i, j]) * 100
-    return StockReturn
-
-
-StockData = process_df_for_mvo(train)
-TradeData = process_df_for_mvo(trade)
-
-arStockPrices = np.asarray(StockData)
-[Rows, Cols] = arStockPrices.shape
-arReturns = StockReturnsComputing(arStockPrices, Rows, Cols)
-
-meanReturns = np.mean(arReturns, axis=0)
-covReturns = np.cov(arReturns, rowvar=False)
-
-np.set_printoptions(precision=3, suppress=True)
-print("Mean returns of assets in portfolio\n", meanReturns)
-
-try:
-    from pypfopt.efficient_frontier import EfficientFrontier
-
-    ef_mean = EfficientFrontier(meanReturns, covReturns, weight_bounds=(0, 0.5))
-    raw_weights_mean = ef_mean.max_sharpe()
-    cleaned_weights_mean = ef_mean.clean_weights()
-    mvo_weights = np.array([1000000 * cleaned_weights_mean[i] for i in range(len(cleaned_weights_mean))])
-    LastPrice = np.array([1 / p for p in StockData.tail(1).to_numpy()[0]])
-    Initial_Portfolio = np.multiply(mvo_weights, LastPrice)
-    Portfolio_Assets = TradeData @ Initial_Portfolio
-    MVO_result = pd.DataFrame(Portfolio_Assets, columns=["Mean Var"])
-except Exception as exc:
-    print(f"MVO baseline failed: {exc}")
-    MVO_result = pd.DataFrame(index=TradeData.index, data={"Mean Var": np.nan})
+# MVO baseline is intentionally removed from all future outputs.
+# Keep DJI as the only market baseline for backtest_result CSV/PNG files.
 
 # %% Part 5. DJIA index baseline
 
-trade_dates_for_dji = list(pd.Index(trade.index.unique()).astype(str))
-dji = build_dji_baseline(trade_dates_for_dji, initial_amount=1_000_000.0).to_frame(name="dji")
+trade_dates = get_trade_dates(trade)
+dji = build_dji_baseline(trade_dates, initial_amount=1_000_000.0).reindex(trade_dates).to_frame(name="dji")
 
 # %% Part 6. Compare results
 
 
-def set_account_index(df):
-    return df.set_index(df.columns[0]) if df is not None else None
+result = pd.DataFrame(index=trade_dates)
+result.index.name = "date"
 
+agent_outputs = {
+    "a2c": (if_using_a2c, df_account_value_a2c),
+    "ddpg": (if_using_ddpg, df_account_value_ddpg),
+    "ppo": (if_using_ppo, df_account_value_ppo),
+    "td3": (if_using_td3, df_account_value_td3),
+    "sac": (if_using_sac, df_account_value_sac),
+}
+for agent_name, (enabled, account_value) in agent_outputs.items():
+    if enabled:
+        result[agent_name] = align_account_value_to_dates(account_value, trade_dates)
 
-df_result_a2c = set_account_index(df_account_value_a2c)
-df_result_ddpg = set_account_index(df_account_value_ddpg)
-df_result_ppo = set_account_index(df_account_value_ppo)
-df_result_td3 = set_account_index(df_account_value_td3)
-df_result_sac = set_account_index(df_account_value_sac)
-
-result = pd.DataFrame(
-    {
-        "a2c": df_result_a2c["account_value"] if if_using_a2c else None,
-        "ddpg": df_result_ddpg["account_value"] if if_using_ddpg else None,
-        "ppo": df_result_ppo["account_value"] if if_using_ppo else None,
-        "td3": df_result_td3["account_value"] if if_using_td3 else None,
-        "sac": df_result_sac["account_value"] if if_using_sac else None,
-        "mvo": MVO_result["Mean Var"],
-        "dji": dji["dji"],
-    }
-)
+result["dji"] = pd.to_numeric(dji["dji"], errors="coerce")
 
 print("\n=== Backtest Results ===")
 print(result)
@@ -717,8 +704,6 @@ if if_using_ppo and "ppo" in result.columns and result["ppo"].notna().any():
     drawdown = ppo / running_max - 1
     summary["ppo_max_drawdown"] = float(drawdown.min())
 
-if "mvo" in result.columns and result["mvo"].notna().any():
-    summary["final_mvo"] = float(result["mvo"].dropna().iloc[-1])
 if "dji" in result.columns and result["dji"].notna().any():
     summary["final_dji"] = float(result["dji"].dropna().iloc[-1])
 

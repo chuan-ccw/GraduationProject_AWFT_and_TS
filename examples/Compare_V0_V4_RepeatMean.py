@@ -159,6 +159,90 @@ def set_month_xticklabels(ax, dates, max_xticks: int = MAX_XTICKS) -> None:
     ax.set_xticklabels([format_yyyy_mm(dates[i]) for i in positions], rotation=0, ha="center")
 
 
+def normalize_date_column(series: pd.Series) -> pd.Series:
+    """Normalize real date strings to YYYY-MM-DD and reject numeric day indexes."""
+    text = series.astype(str).str.strip()
+    is_date_text = text.str.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$")
+    parsed = pd.to_datetime(text.where(is_date_text), errors="coerce")
+    return parsed.dt.strftime("%Y-%m-%d")
+
+
+def keep_valid_date_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop rows whose date is an internal numeric trading-day index."""
+    if "date" not in df.columns:
+        return df
+    out = df.copy()
+    out["date"] = normalize_date_column(out["date"])
+    out = out[out["date"].notna()].copy()
+    return out.reset_index(drop=True)
+
+
+def _normalize_series(series: pd.Series) -> pd.Series:
+    series = pd.to_numeric(series, errors="coerce")
+    first_valid = series.dropna()
+    if first_valid.empty or first_valid.iloc[0] == 0:
+        return series
+    return series / first_valid.iloc[0]
+
+
+def build_dji_baseline(trade_dates, initial_amount: float = 1_000_000.0) -> pd.Series:
+    """Download and align DJI close prices to the provided trade dates."""
+    trade_index = pd.Index([str(x)[:10] for x in trade_dates], name="date")
+    if len(trade_index) == 0:
+        return pd.Series(dtype=float, name="dji")
+
+    try:
+        import yfinance as yf
+
+        start_ts = pd.to_datetime(trade_index[0], errors="coerce") - pd.Timedelta(days=7)
+        end_ts = pd.to_datetime(trade_index[-1], errors="coerce") + pd.Timedelta(days=7)
+        df_dji = yf.download(
+            "^DJI",
+            start=start_ts.strftime("%Y-%m-%d"),
+            end=end_ts.strftime("%Y-%m-%d"),
+            progress=False,
+            auto_adjust=False,
+        )
+        if df_dji is None or df_dji.empty:
+            raise ValueError("empty yfinance result")
+
+        close = None
+        if isinstance(df_dji.columns, pd.MultiIndex):
+            for candidate in ("Close", "Adj Close"):
+                level0 = [str(x) for x in df_dji.columns.get_level_values(0)]
+                if candidate in level0:
+                    sub = df_dji.xs(candidate, axis=1, level=0)
+                    close = sub.iloc[:, 0] if isinstance(sub, pd.DataFrame) else sub
+                    break
+        else:
+            for candidate in ["Close", "Adj Close", "close", "adj close"]:
+                if candidate in df_dji.columns:
+                    close = df_dji[candidate]
+                    break
+
+        if close is None:
+            raise ValueError(f"cannot find Close column, columns={list(df_dji.columns)}")
+
+        close = pd.to_numeric(close, errors="coerce").dropna()
+        if close.empty:
+            raise ValueError("DJI close series is empty after numeric conversion")
+
+        close.index = pd.Index(pd.to_datetime(close.index, errors="coerce").strftime("%Y-%m-%d"), name="date")
+        close = close[~close.index.duplicated(keep="last")]
+
+        aligned = close.reindex(trade_index).ffill().bfill()
+        valid = aligned.dropna()
+        if valid.empty:
+            raise ValueError("DJI series is empty after reindex to trade dates")
+
+        normalized = aligned / float(valid.iloc[0]) * float(initial_amount)
+        normalized.name = "dji"
+        return normalized
+    except Exception as exc:
+        print(f"DJI baseline failed: {exc}")
+        return pd.Series(index=trade_index, data=np.nan, name="dji")
+
+
 def find_latest_rolling_root(reward_type: str) -> Path | None:
     reward_type = normalize_reward_type(reward_type)
     experiment_root = Path(EXPERIMENT_ROOT)
@@ -278,6 +362,9 @@ def collect_repeat_mean_series(rolling_root: Path, reward_type: str) -> pd.DataF
             continue
         if "date" not in df.columns:
             df = df.rename(columns={df.columns[0]: "date"})
+        df = keep_valid_date_rows(df)
+        if df.empty:
+            continue
         df = df.copy()
         df["source_window"] = csv_path.parents[1].name
         df["source_csv"] = str(csv_path)
@@ -290,6 +377,9 @@ def collect_repeat_mean_series(rolling_root: Path, reward_type: str) -> pd.DataF
     out = pd.concat(frames, ignore_index=True)
     if "date" not in out.columns:
         raise KeyError(f"repeat_mean_{reward_type} 的 backtest_result.csv 缺少 date 欄位")
+    out = keep_valid_date_rows(out)
+    if out.empty:
+        raise ValueError(f"repeat_mean_{reward_type} 的 backtest_result.csv 沒有有效日期列。")
     out = out.drop_duplicates(subset=["date"], keep="last")
     out = out.sort_values("date").reset_index(drop=True)
     out.attrs["source_csvs"] = source_csvs
@@ -314,7 +404,9 @@ def collect_continuous_5y_series(rolling_root: Path, reward_type: str) -> pd.Dat
     if "ppo_continuous_norm" not in df.columns:
         raise KeyError(f"{csv_path} 缺少 ppo_continuous_norm 欄位。")
 
-    out = df.copy()
+    out = keep_valid_date_rows(df.copy())
+    if out.empty:
+        raise ValueError(f"{csv_path} 沒有有效日期列。")
     out["ppo_mean_norm"] = pd.to_numeric(out["ppo_continuous_norm"], errors="coerce")
     out["ppo_min_norm"] = out["ppo_mean_norm"]
     out["ppo_max_norm"] = out["ppo_mean_norm"]
@@ -426,6 +518,15 @@ def build_compare_dataframe(df_v0: pd.DataFrame, df_target: pd.DataFrame, target
         merged["dji_mean_norm"] = merged[f"dji_mean_norm_{target_reward_type}"]
     elif "dji_mean_norm" not in merged.columns:
         merged["dji_mean_norm"] = np.nan
+
+    if not pd.to_numeric(merged["dji_mean_norm"], errors="coerce").notna().any():
+        dji_series = build_dji_baseline(merged["date"].tolist(), initial_amount=1_000_000.0)
+        if dji_series.notna().any():
+            dji_series = pd.to_numeric(
+                dji_series.reindex(pd.Index(merged["date"].astype(str), name="date")),
+                errors="coerce",
+            )
+            merged["dji_mean_norm"] = _normalize_series(dji_series).to_numpy()
 
     return merged
 

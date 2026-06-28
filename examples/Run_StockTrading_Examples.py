@@ -30,7 +30,7 @@ from finrl import config
 #   "v3" = sum(action * future n-day average simple return)
 #   "v4" = sum(delta action * future n-day average simple return)
 
-REWARD_TYPE = "v4"
+REWARD_TYPE = "v0"
 
 REWARD_PARAMS_BY_TYPE = {
     "v0": {},
@@ -114,6 +114,24 @@ def set_month_xticklabels(ax, dates, max_xticks: int = 12) -> None:
         return
     ax.set_xticks(positions)
     ax.set_xticklabels([format_yyyy_mm(dates[i]) for i in positions], rotation=0, ha="center")
+
+
+def normalize_date_column(series: pd.Series) -> pd.Series:
+    """Normalize real date strings to YYYY-MM-DD and reject numeric day indexes."""
+    text = series.astype(str).str.strip()
+    is_date_text = text.str.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$")
+    parsed = pd.to_datetime(text.where(is_date_text), errors="coerce")
+    return parsed.dt.strftime("%Y-%m-%d")
+
+
+def keep_valid_date_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop rows whose date is an internal numeric trading-day index."""
+    if "date" not in df.columns:
+        return df
+    out = df.copy()
+    out["date"] = normalize_date_column(out["date"])
+    out = out[out["date"].notna()].copy()
+    return out.reset_index(drop=True)
 
 
 def build_dji_baseline(trade_dates, initial_amount: float = 1_000_000.0) -> pd.Series:
@@ -221,7 +239,7 @@ TRAIN_RANDOM_SEED = BASE_RANDOM_SEED + 1
 
 # False = 測試時從 PPO policy 分布抽樣，讓同一個 model 的 5 次 test 可以有差異。
 # True  = 測試時固定選最可能的 action，5 次 test 通常會完全相同。
-TEST_PREDICT_DETERMINISTIC = False
+TEST_PREDICT_DETERMINISTIC = True
 
 # 非 rolling mode 才會用到這組日期
 TRAIN_START_DATE = "2018-01-01"
@@ -525,7 +543,7 @@ def write_rolling_summaries(rolling_root: Path, summary_rows: list[dict[str, Any
 
     numeric_cols = [
         col
-        for col in ["final_ppo", "ppo_return", "ppo_max_drawdown", "final_mvo", "final_dji"]
+        for col in ["final_ppo", "ppo_return", "ppo_max_drawdown", "final_dji"]
         if col in summary_df.columns
     ]
     if numeric_cols:
@@ -549,7 +567,12 @@ def _read_backtest_csv(csv_path: Path) -> pd.DataFrame | None:
         first_col = df.columns[0]
         if first_col != "date":
             df = df.rename(columns={first_col: "date"})
-        df["date"] = df["date"].astype(str)
+        df = keep_valid_date_rows(df)
+        if df.empty:
+            return None
+        value_cols = [c for c in df.columns if c not in {"date"}]
+        if value_cols and not df[value_cols].apply(pd.to_numeric, errors="coerce").notna().any().any():
+            return None
         return df
     except Exception as exc:
         print(f"讀取 backtest csv 失敗: {csv_path} -> {exc}")
@@ -562,6 +585,24 @@ def _normalize_series(series: pd.Series) -> pd.Series:
     if first_valid.empty or first_valid.iloc[0] == 0:
         return series
     return series / first_valid.iloc[0]
+
+
+def fill_dji_mean_norm_if_missing(df: pd.DataFrame, initial_amount: float = 1_000_000.0) -> pd.DataFrame:
+    """Fill dji_mean_norm from real dates when older source CSVs have empty DJI data."""
+    if "date" not in df.columns:
+        return df
+    if "dji_mean_norm" in df.columns and pd.to_numeric(df["dji_mean_norm"], errors="coerce").notna().any():
+        return df
+
+    out = df.copy()
+    dji_series = build_dji_baseline(out["date"].tolist(), initial_amount=initial_amount)
+    if dji_series.notna().any():
+        dji_series = pd.to_numeric(
+            dji_series.reindex(pd.Index(out["date"].astype(str), name="date")),
+            errors="coerce",
+        )
+        out["dji_mean_norm"] = _normalize_series(dji_series).to_numpy()
+    return out
 
 
 def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
@@ -655,6 +696,16 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
         aggregate_df["dji_mean"] = dji_df.mean(axis=1)
         aggregate_df["dji_mean_norm"] = _normalize_series(aggregate_df["dji_mean"])
 
+    if "dji_mean_norm" not in aggregate_df.columns or not aggregate_df["dji_mean_norm"].notna().any():
+        dji_series = build_dji_baseline(base_dates.tolist(), initial_amount=1_000_000.0)
+        if dji_series.notna().any():
+            dji_series = pd.to_numeric(
+                dji_series.reindex(pd.Index(base_dates.astype(str), name="date")),
+                errors="coerce",
+            )
+            aggregate_df["dji_mean"] = dji_series.to_numpy()
+            aggregate_df["dji_mean_norm"] = _normalize_series(aggregate_df["dji_mean"])
+
     trade_start_date = trade_start_date or str(base_dates.iloc[0])
     trade_end_date = trade_end_date or str(base_dates.iloc[-1])
 
@@ -734,6 +785,7 @@ def _collect_repeat_mean_series(rolling_root: Path, reward_type: str) -> pd.Data
     if not frames:
         return None
     out = pd.concat(frames, ignore_index=True)
+    out = keep_valid_date_rows(out)
     out = out.drop_duplicates(subset=["date"], keep="last")
     out.attrs["source_csvs"] = source_csvs
     return out
@@ -805,6 +857,7 @@ def compare_latest_v0_target(target_reward_type: str) -> None:
         how="outer",
         suffixes=("_v0", f"_{target_reward_type}"),
     ).sort_values("date").reset_index(drop=True)
+    merged = fill_dji_mean_norm_if_missing(merged)
     merged.to_csv(compare_dir / "compare_metrics.csv", index=False, encoding="utf-8-sig")
 
     fig, ax = plt.subplots(figsize=(16, 6))
@@ -843,7 +896,7 @@ def compare_latest_v0_target(target_reward_type: str) -> None:
 
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1)
     set_month_xticklabels(ax, merged["date"].tolist(), max_xticks=14)
-    ax.set_title(f"{baseline_name} vs {target_name} Repeat-Mean Asset Allocation (MVO excluded)")
+    ax.set_title(f"{baseline_name} vs {target_name} Repeat-Mean Asset Allocation")
     set_axis_labels_horizontal(ax, "Date", "Asset Allocation (initial = 1.0)", ylabel_pad=85)
     ax.legend()
     plt.tight_layout()
@@ -1261,6 +1314,7 @@ def _collect_continuous_5y_series(rolling_root: Path, reward_type: str) -> pd.Da
     if "dji_mean_norm" in df.columns:
         keep_cols.append("dji_mean_norm")
     out = df[keep_cols].copy()
+    out = keep_valid_date_rows(out)
     out = out.rename(columns={"ppo_continuous_norm": f"ppo_continuous_norm_{reward_type}"})
     out.attrs["source_csvs"] = [str(csv_path)]
     return out
@@ -1312,6 +1366,7 @@ def compare_latest_continuous_v0_target(target_reward_type: str) -> None:
         return
 
     merged = pd.merge(df_v0, df_target, on="date", how="outer").sort_values("date").reset_index(drop=True)
+    merged = fill_dji_mean_norm_if_missing(merged)
     compare_root = Path(EXPERIMENT_ROOT) / f"compare_v0_{target_reward_type}_continuous5y"
     compare_dir = compare_root / datetime.now().strftime("%Y%m%d_%H%M%S")
     compare_dir.mkdir(parents=True, exist_ok=False)
