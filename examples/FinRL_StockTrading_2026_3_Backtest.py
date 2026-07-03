@@ -654,7 +654,7 @@ for col in result.columns:
     series = pd.to_numeric(result[col], errors="coerce")
     if series.notna().any():
         ax.plot(x, series, label=col)
-ax.set_title("Asset Allocation Over Time")
+ax.set_title("Equity Curve")
 set_axis_labels_horizontal(ax, "Date", "Asset Allocation ($)", ylabel_pad=65)
 set_month_xticklabels(ax, list(result.index), max_xticks=12)
 ax.legend()

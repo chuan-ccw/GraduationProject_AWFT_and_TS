@@ -61,9 +61,9 @@ TARGET_REWARD_TYPE = "v4"
 COMPARE_NAME = ""
 
 # 比較資料來源：
-#   "repeat_mean"   = 原本 yearly reset 的 repeat_mean 比較。
+#   "annual_reset"   = Annual Reset 比較。
 #   "continuous_5y" = 連續 5 年 test，比較 continuous_5y_test/continuous_portfolio_value.csv。
-COMPARE_DATA_MODE = "repeat_mean"
+COMPARE_DATA_MODE = "annual_reset"
 
 MAX_XTICKS = 14
 
@@ -301,7 +301,7 @@ def resolve_rolling_root(label: str, reward_type: str | None, rolling_name_or_pa
 
 
 def detect_reward_type_from_rolling_root(rolling_root: Path, default: str | None = None) -> str:
-    """Detect reward version from config, parent folder, repeat_mean folder, or CSV filename."""
+    """Detect reward version from config, parent folder, annual_reset folder, or CSV filename."""
     config_path = rolling_root / "rolling_config.json"
     if config_path.exists():
         try:
@@ -319,13 +319,13 @@ def detect_reward_type_from_rolling_root(rolling_root: Path, default: str | None
             if detected:
                 return detected
 
-    for p in rolling_root.glob("window_*/repeat_mean_*"):
-        detected = normalize_reward_type(p.name.replace("repeat_mean_", ""))
+    for p in rolling_root.glob("window_*/annual_reset_*"):
+        detected = normalize_reward_type(p.name.replace("annual_reset_", ""))
         if detected:
             return detected
 
-    for p in rolling_root.glob("window_*/repeat_mean_*/backtest_result_repeat_mean_*.csv"):
-        m = re.search(r"backtest_result_repeat_mean_(.+?)_\d{4}-\d{2}-\d{2}_to_", p.name)
+    for p in rolling_root.glob("window_*/annual_reset_*/backtest_result_annual_reset_*.csv"):
+        m = re.search(r"backtest_result_annual_reset_(.+?)_\d{4}-\d{2}-\d{2}_to_", p.name)
         if m:
             detected = normalize_reward_type(m.group(1))
             if detected:
@@ -337,22 +337,22 @@ def detect_reward_type_from_rolling_root(rolling_root: Path, default: str | None
     raise ValueError(f"無法從 {rolling_root} 判斷 reward type。")
 
 
-def collect_repeat_mean_series(rolling_root: Path, reward_type: str) -> pd.DataFrame:
-    """Read all window repeat_mean backtest_result.csv files and concatenate them."""
+def collect_annual_reset_series(rolling_root: Path, reward_type: str) -> pd.DataFrame:
+    """Read all window annual_reset backtest_result.csv files and concatenate them."""
     reward_type = normalize_reward_type(reward_type)
 
     # Prefer the canonical CSV because it is the stable source used by comparison plots.
-    csv_paths = sorted(rolling_root.glob(f"window_*/repeat_mean_{reward_type}/backtest_result.csv"))
+    csv_paths = sorted(rolling_root.glob(f"window_*/annual_reset_{reward_type}/backtest_result.csv"))
 
     # Fallback for older output folders that did not create backtest_result.csv.
     if not csv_paths:
         csv_paths = sorted(
-            rolling_root.glob(f"window_*/repeat_mean_{reward_type}/backtest_result_repeat_mean_{reward_type}_*.csv")
+            rolling_root.glob(f"window_*/annual_reset_{reward_type}/backtest_result_annual_reset_{reward_type}_*.csv")
         )
 
     if not csv_paths:
-        # Last-resort fallback: if target folder was selected but reward type name changed, use any repeat_mean_* folder.
-        csv_paths = sorted(rolling_root.glob("window_*/repeat_mean_*/backtest_result.csv"))
+        # Last-resort fallback: if target folder was selected but reward type name changed, use any annual_reset_* folder.
+        csv_paths = sorted(rolling_root.glob("window_*/annual_reset_*/backtest_result.csv"))
 
     frames: list[pd.DataFrame] = []
     source_csvs: list[str] = []
@@ -372,14 +372,14 @@ def collect_repeat_mean_series(rolling_root: Path, reward_type: str) -> pd.DataF
         frames.append(df)
 
     if not frames:
-        raise FileNotFoundError(f"{rolling_root} 裡找不到 repeat_mean_{reward_type}/backtest_result.csv")
+        raise FileNotFoundError(f"{rolling_root} 裡找不到 annual_reset_{reward_type}/backtest_result.csv")
 
     out = pd.concat(frames, ignore_index=True)
     if "date" not in out.columns:
-        raise KeyError(f"repeat_mean_{reward_type} 的 backtest_result.csv 缺少 date 欄位")
+        raise KeyError(f"annual_reset_{reward_type} 的 backtest_result.csv 缺少 date 欄位")
     out = keep_valid_date_rows(out)
     if out.empty:
-        raise ValueError(f"repeat_mean_{reward_type} 的 backtest_result.csv 沒有有效日期列。")
+        raise ValueError(f"annual_reset_{reward_type} 的 backtest_result.csv 沒有有效日期列。")
     out = out.drop_duplicates(subset=["date"], keep="last")
     out = out.sort_values("date").reset_index(drop=True)
     out.attrs["source_csvs"] = source_csvs
@@ -419,12 +419,12 @@ def collect_continuous_5y_series(rolling_root: Path, reward_type: str) -> pd.Dat
 
 def collect_compare_series(rolling_root: Path, reward_type: str, compare_data_mode: str) -> pd.DataFrame:
     """Collect compare source according to COMPARE_DATA_MODE."""
-    mode = str(compare_data_mode or "repeat_mean").strip().lower()
+    mode = str(compare_data_mode or "annual_reset").strip().lower()
     if mode in {"continuous", "continuous_5y", "continuous5y"}:
         return collect_continuous_5y_series(rolling_root, reward_type)
-    if mode in {"repeat", "repeat_mean", "yearly_reset"}:
-        return collect_repeat_mean_series(rolling_root, reward_type)
-    raise ValueError('COMPARE_DATA_MODE 只能是 "repeat_mean" 或 "continuous_5y"。')
+    if mode in {"repeat", "annual_reset"}:
+        return collect_annual_reset_series(rolling_root, reward_type)
+    raise ValueError('COMPARE_DATA_MODE 只能是 "annual_reset" 或 "continuous_5y"。')
 
 def _strategy_return_percent(series: pd.Series) -> float:
     valid = pd.to_numeric(series, errors="coerce").dropna()
@@ -481,7 +481,7 @@ def make_compare_dir(root_v0: Path, root_target: Path, target_reward_type: str, 
             f"__{target_reward_type}_{_safe_name(root_target.name, 36)}"
             f"__{timestamp}"
         )
-    suffix = "continuous5y" if compare_data_mode in {"continuous", "continuous_5y", "continuous5y"} else "repeat_mean"
+    suffix = "continuous5y" if compare_data_mode in {"continuous", "continuous_5y", "continuous5y"} else "annual_reset"
     compare_root = Path(EXPERIMENT_ROOT) / f"compare_v0_{target_reward_type}_{suffix}"
     compare_dir = compare_root / folder_name
     compare_dir.mkdir(parents=True, exist_ok=False)
@@ -563,7 +563,7 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_ta
     set_month_xticklabels(ax, merged["date"].tolist(), max_xticks=MAX_XTICKS)
 
     title_mode = "Continuous 5-Year Test" if compare_data_mode in {"continuous", "continuous_5y", "continuous5y"} else "Repeat-Mean"
-    ax.set_title(f"{baseline_name} vs {target_name} {title_mode} Asset Allocation")
+    ax.set_title(f"{baseline_name} vs {target_name} {title_mode} Equity Curve")
     set_axis_labels_horizontal(ax, "Date", "Asset Allocation (initial = 1.0)", ylabel_pad=95)
     ax.legend()
     plt.tight_layout()

@@ -279,7 +279,10 @@ def reward_v4(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     使用 action value 變化量與未來 n 天平均價格報酬計算 reward。
 
     Formula:
-        R_t = sum_i delta_a(i,t) * r_avg(i,t)
+        R_t = sum_i effective_a(i,t) * r_avg(i,t)
+
+        effective_a(i,t) = delta_a(i,t), if delta_a(i,t) != 0
+        effective_a(i,t) = a(i,t),       if delta_a(i,t) == 0
 
         delta_a(i,t) = a(i,t) - a(i,t-1)
 
@@ -296,8 +299,9 @@ def reward_v4(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     Meaning:
         If future average price is higher and action increases, reward is positive.
         If future average price is lower and action decreases, reward is positive.
-        This encourages the model to reward correct position adjustment direction,
-        not just the absolute action direction.
+        If action does not change, fall back to the current action direction.
+        This encourages correct position adjustment direction while still scoring
+        unchanged positions by their current action direction.
     """
     params = params or {}
 
@@ -339,12 +343,17 @@ def reward_v4(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     avg_future_prices = np.nanmean(future_window, axis=0)
 
     future_avg_returns = (avg_future_prices - current_prices) / (current_prices + eps)
+    effective_action_units = np.where(
+        np.isclose(delta_action_units, 0.0, atol=eps),
+        current_action_units,
+        delta_action_units,
+    )
 
     valid = (
         np.isfinite(current_prices)
         & np.isfinite(avg_future_prices)
         & np.isfinite(future_avg_returns)
-        & np.isfinite(delta_action_units)
+        & np.isfinite(effective_action_units)
         & np.all(np.isfinite(future_window), axis=0)
         & (current_prices > eps)
         & (avg_future_prices > eps)
@@ -353,7 +362,7 @@ def reward_v4(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     if not np.any(valid):
         return 0.0
 
-    return float(np.sum(delta_action_units[valid] * future_avg_returns[valid]))
+    return float(np.sum(effective_action_units[valid] * future_avg_returns[valid]))
 
 
 REWARD_FUNCTIONS = {

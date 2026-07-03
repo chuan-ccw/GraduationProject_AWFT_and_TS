@@ -30,7 +30,7 @@ from finrl import config
 #   "v3" = sum(action * future n-day average simple return)
 #   "v4" = sum(delta action * future n-day average simple return)
 
-REWARD_TYPE = "v0"
+REWARD_TYPE = "v4"
 
 REWARD_PARAMS_BY_TYPE = {
     "v0": {},
@@ -200,7 +200,7 @@ UNUSED_COMPARE_IMAGE_NAMES = [
 
 
 def is_backtest_repeat_dir(path: Path) -> bool:
-    """Return True only for real backtest repeat folders, not repeat_mean folders."""
+    """Return True only for real backtest repeat folders, not annual_reset folders."""
     return path.is_dir() and re.fullmatch(r"repeat_\d{2}_seed_\d+", path.name) is not None
 
 
@@ -231,14 +231,13 @@ TRAIN_YEARS = 3
 TEST_YEARS = 1
 SHIFT_YEARS = 1
 
-# 每個 rolling window 的 backtest 重複次數
-# 注意：每個 window 只 train 一次 PPO model，train 完後再用同一個 model test 5 次。
+# 每個 rolling window 的 repeat 次數
+# 注意：每個 repeat 都會 train 一個新的 PPO model，然後只 backtest 一次。
 REPEAT_EXPERIMENTS = 5
 BASE_RANDOM_SEED = 42
-TRAIN_RANDOM_SEED = BASE_RANDOM_SEED + 1
 
-# False = 測試時從 PPO policy 分布抽樣，讓同一個 model 的 5 次 test 可以有差異。
-# True  = 測試時固定選最可能的 action，5 次 test 通常會完全相同。
+# False = 測試時從 PPO policy 分布抽樣。
+# True  = 測試時固定選最可能的 action，讓同一個 model + state 的結果可重現。
 TEST_PREDICT_DETERMINISTIC = True
 
 # 非 rolling mode 才會用到這組日期
@@ -267,9 +266,9 @@ RUN_BACKTEST = True
 AUTO_COMPARE_LATEST = False
 
 # 連續 5 年 test：
-#   False = 保持原本 yearly reset / repeat_mean 流程。
+#   False = 保持 Annual Reset 流程。
 #   True  = rolling 結束後額外跑一次連續 test，上一個 window 的 cash/holdings 會接到下一個 window。
-RUN_CONTINUOUS_5Y_TEST = True
+RUN_CONTINUOUS_5Y_TEST = False
 
 # 若 RUN_CONTINUOUS_5Y_TEST=True，且 v0 與目前 REWARD_TYPE 都已有 continuous_5y_test 結果，
 # 可自動產生連續 5 年的 compare_portfolio_value.png。
@@ -392,7 +391,6 @@ def base_experiment_config() -> dict[str, Any]:
         "run_continuous_5y_test": RUN_CONTINUOUS_5Y_TEST,
         "auto_compare_continuous_latest": AUTO_COMPARE_CONTINUOUS_LATEST,
         "base_random_seed": BASE_RANDOM_SEED,
-        "train_random_seed": TRAIN_RANDOM_SEED,
         "run_data": RUN_DATA,
         "run_train": RUN_TRAIN,
         "run_backtest": RUN_BACKTEST,
@@ -605,20 +603,19 @@ def fill_dji_mean_norm_if_missing(df: pd.DataFrame, initial_amount: float = 1_00
     return out
 
 
-def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
-    """Create the per-window repeat-mean folder used by reward comparison.
+def plot_window_annual_reset_aggregate(window_dir: Path, reward_type: str) -> None:
+    """Create the per-window Annual Reset folder used by reward comparison.
 
     New folder layout:
-      train_once_seed_43/         -> training only, not a backtest repeat
-      repeat_01_seed_43/ ...      -> real backtest repeat folders
-      repeat_mean_v?/             -> aggregate output, must NOT be read as input
+      repeat_01_seed_43/ ...      -> each repeat contains one trained model and one backtest result
+      annual_reset_v?/             -> aggregate output, must NOT be read as input
 
     Output folder:
-      repeat_mean_v?/
+      annual_reset_v?/
         account_value.csv        -> ppo mean/min/max + dji mean, normalized columns
         backtest_result.csv      -> same content, convenient for plotting
-        backtest_result_repeat_mean_*.csv/png
-        image_source_manifest.csv -> source CSVs used by the repeat-mean plot
+        backtest_result_annual_reset_*.csv/png
+        image_source_manifest.csv -> source CSVs used by the Annual Reset plot
     """
     repeat_dirs = sorted([p for p in window_dir.iterdir() if is_backtest_repeat_dir(p)])
     if not repeat_dirs:
@@ -639,7 +636,7 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
             continue
         source_rows.append(
             {
-                "plot": "backtest_result_repeat_mean.png",
+                "plot": "backtest_result_annual_reset.png",
                 "source_role": "single_backtest_repeat",
                 "source_repeat_dir": str(repeat_dir),
                 "source_csv": str(csv_path),
@@ -709,14 +706,14 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
     trade_start_date = trade_start_date or str(base_dates.iloc[0])
     trade_end_date = trade_end_date or str(base_dates.iloc[-1])
 
-    mean_dir = window_dir / f"repeat_mean_{reward_type}"
+    mean_dir = window_dir / f"annual_reset_{reward_type}"
     mean_dir.mkdir(parents=True, exist_ok=True)
     account_value_path = mean_dir / "account_value.csv"
     backtest_result_path = mean_dir / "backtest_result.csv"
     aggregate_df.to_csv(account_value_path, index=False, encoding="utf-8-sig")
     aggregate_df.to_csv(backtest_result_path, index=False, encoding="utf-8-sig")
 
-    aggregate_csv_path = mean_dir / f"backtest_result_repeat_mean_{reward_type}_{trade_start_date}_to_{trade_end_date}_{date_suffix}.csv"
+    aggregate_csv_path = mean_dir / f"backtest_result_annual_reset_{reward_type}_{trade_start_date}_to_{trade_end_date}_{date_suffix}.csv"
     aggregate_df.to_csv(aggregate_csv_path, index=False, encoding="utf-8-sig")
 
     fig, ax = plt.subplots(figsize=(15, 5))
@@ -739,13 +736,13 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1)
     set_month_xticklabels(ax, aggregate_df["date"].tolist(), max_xticks=12)
 
-    ax.set_title(f"Repeat Mean Asset Allocation - {reward_name} (initial = 1.0)")
+    ax.set_title(f"Equity Curve - {reward_name} (initial = 1.0)")
     set_axis_labels_horizontal(ax, "Date", "Asset Allocation (initial = 1.0)", ylabel_pad=85)
     ax.legend()
     plt.tight_layout()
 
-    aggregate_plot_path = mean_dir / f"backtest_result_repeat_mean_{reward_type}_{trade_start_date}_to_{trade_end_date}_{date_suffix}.png"
-    canonical_plot_path = mean_dir / "backtest_result_repeat_mean.png"
+    aggregate_plot_path = mean_dir / f"backtest_result_annual_reset_{reward_type}_{trade_start_date}_to_{trade_end_date}_{date_suffix}.png"
+    canonical_plot_path = mean_dir / "backtest_result_annual_reset.png"
     plt.savefig(aggregate_plot_path, dpi=150, bbox_inches="tight")
     plt.savefig(canonical_plot_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -757,8 +754,8 @@ def plot_window_repeat_aggregate(window_dir: Path, reward_type: str) -> None:
         source_manifest["canonical_output_png"] = str(canonical_plot_path)
         source_manifest.to_csv(mean_dir / "image_source_manifest.csv", index=False, encoding="utf-8-sig")
 
-    print(f"Window repeat-mean folder saved to: {mean_dir}")
-    print(f"Repeat-mean source repeats: {len(source_rows)}")
+    print(f"Window Annual Reset folder saved to: {mean_dir}")
+    print(f"Annual Reset source repeats: {len(source_rows)}")
 
 
 def _find_latest_rolling_root(reward_type: str) -> Path | None:
@@ -774,10 +771,10 @@ def _find_latest_rolling_root(reward_type: str) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
 
 
-def _collect_repeat_mean_series(rolling_root: Path, reward_type: str) -> pd.DataFrame | None:
+def _collect_annual_reset_series(rolling_root: Path, reward_type: str) -> pd.DataFrame | None:
     frames = []
     source_csvs: list[str] = []
-    for csv_path in sorted(rolling_root.glob(f"window_*/repeat_mean_{reward_type}/backtest_result.csv")):
+    for csv_path in sorted(rolling_root.glob(f"window_*/annual_reset_{reward_type}/backtest_result.csv")):
         df = pd.read_csv(csv_path)
         if not df.empty:
             source_csvs.append(str(csv_path))
@@ -799,7 +796,7 @@ def write_compare_source_manifest(
     df_v0: pd.DataFrame,
     df_target: pd.DataFrame,
 ) -> None:
-    """Record which repeat-mean CSV files were used by compare_portfolio_value.png."""
+    """Record which Annual Reset CSV files were used by compare_portfolio_value.png."""
     rows: list[dict[str, Any]] = []
     for label, root, df in [
         ("v0", root_v0, df_v0),
@@ -809,7 +806,7 @@ def write_compare_source_manifest(
             rows.append(
                 {
                     "plot": "compare_portfolio_value.png",
-                    "source_role": f"repeat_mean_{label}",
+                    "source_role": f"annual_reset_{label}",
                     "rolling_root": str(root),
                     "source_csv": source_csv,
                 }
@@ -824,7 +821,7 @@ def compare_latest_v0_v1() -> None:
 
 
 def compare_latest_v0_target(target_reward_type: str) -> None:
-    """Create Experence_result/compare_v0_<target> using latest repeat-mean outputs.
+    """Create Experence_result/compare_v0_<target> using latest Annual Reset outputs.
 
     The baseline is always v0. The target side follows the current REWARD_TYPE,
     so running this script with REWARD_TYPE="v2" automatically creates v0 vs v2.
@@ -840,10 +837,10 @@ def compare_latest_v0_target(target_reward_type: str) -> None:
         print(f"compare_v0_{target_reward_type} skipped: 找不到 v0 或 {target_reward_type} 的 rolling 結果。")
         return
 
-    df_v0 = _collect_repeat_mean_series(root_v0, "v0")
-    df_target = _collect_repeat_mean_series(root_target, target_reward_type)
+    df_v0 = _collect_annual_reset_series(root_v0, "v0")
+    df_target = _collect_annual_reset_series(root_target, target_reward_type)
     if df_v0 is None or df_target is None:
-        print(f"compare_v0_{target_reward_type} skipped: v0/{target_reward_type} 尚未產生 repeat_mean 資料夾。")
+        print(f"compare_v0_{target_reward_type} skipped: v0/{target_reward_type} 尚未產生 annual_reset 資料夾。")
         return
 
     compare_dir = Path(EXPERIMENT_ROOT) / f"compare_v0_{target_reward_type}"
@@ -896,7 +893,7 @@ def compare_latest_v0_target(target_reward_type: str) -> None:
 
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1)
     set_month_xticklabels(ax, merged["date"].tolist(), max_xticks=14)
-    ax.set_title(f"{baseline_name} vs {target_name} Repeat-Mean Asset Allocation")
+    ax.set_title(f"{baseline_name} vs {target_name} Equity Curve")
     set_axis_labels_horizontal(ax, "Date", "Asset Allocation (initial = 1.0)", ylabel_pad=85)
     ax.legend()
     plt.tight_layout()
@@ -1066,10 +1063,10 @@ def run_continuous_5y_test(
 ) -> None:
     """Run repeated continuous tests across all rolling test windows.
 
-    Each repeat uses the same trained model of each window, but the continuous
-    portfolio state is reset at the beginning of that repeat. Within one repeat,
-    the final cash and stock holdings from window t become the initial portfolio
-    of window t+1.
+    Each repeat uses the model trained in the matching repeat folder of each
+    window. The portfolio state is reset at the beginning of that repeat.
+    Within one repeat, the final cash and stock holdings from window t become
+    the initial portfolio of window t+1.
     """
     reward_type = normalize_reward_type_for_continuous(reward_type)
     out_dir = rolling_root / CONTINUOUS_TEST_DIR_NAME
@@ -1093,16 +1090,16 @@ def run_continuous_5y_test(
         print("-" * 80)
         print(
             f"Continuous 5-year test repeat {repeat_index:02d}, "
-            f"test seed {test_seed}, model seed {TRAIN_RANDOM_SEED}"
+            f"test/model seed {test_seed}"
         )
         print(f"Continuous Repeat Dir: {repeat_dir}")
         print("-" * 80)
 
         for idx, window in enumerate(windows):
             window_dir = rolling_root / window_folder_name(window)
-            train_experiment_dir = window_dir / f"train_once_seed_{TRAIN_RANDOM_SEED}"
-            trade_data_path = train_experiment_dir / "data" / "trade_data.csv"
-            trained_model_dir = train_experiment_dir / "trained_models"
+            experiment_dir = window_dir / repeat_folder_name(repeat_index, test_seed)
+            trade_data_path = experiment_dir / "data" / "trade_data.csv"
+            trained_model_dir = experiment_dir / "trained_models"
 
             if not trade_data_path.exists():
                 raise FileNotFoundError(f"找不到 trade_data.csv: {trade_data_path}")
@@ -1270,7 +1267,7 @@ def run_continuous_5y_test(
         ax.plot(x, dji_y, color="tab:green", linewidth=1.8, label=f"DJI ({dji_ret:.2f}%)")
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1)
     set_month_xticklabels(ax, result["date"].tolist(), max_xticks=14)
-    ax.set_title(f"Continuous 5-Year Test Asset Allocation - {reward_name}")
+    ax.set_title(f"Continuous 5-Year Test Equity Curve - {reward_name}")
     set_axis_labels_horizontal(ax, "Date", "Asset Allocation (initial = 1.0)", ylabel_pad=95)
     ax.legend()
     plt.tight_layout()
@@ -1297,11 +1294,11 @@ def run_continuous_5y_test(
         "start_date": start_date,
         "end_date": end_date,
         "carry_state": "cash_and_stock_holdings_from_previous_window",
-        "repeat_mean_source": "same_trained_models_with_stochastic_policy_sampling",
+        "annual_reset_source": "matching_repeat_models",
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     save_json(out_dir / "continuous_config.json", config_payload)
-    print(f"Continuous 5-year repeat-mean test saved to: {out_dir}")
+    print(f"Continuous 5-year Annual Reset test saved to: {out_dir}")
 
 def _collect_continuous_5y_series(rolling_root: Path, reward_type: str) -> pd.DataFrame | None:
     csv_path = rolling_root / CONTINUOUS_TEST_DIR_NAME / "continuous_portfolio_value.csv"
@@ -1396,7 +1393,7 @@ def compare_latest_continuous_v0_target(target_reward_type: str) -> None:
 
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1)
     set_month_xticklabels(ax, merged["date"].tolist(), max_xticks=14)
-    ax.set_title(f"{baseline_name} vs {target_name} Continuous 5-Year Test Asset Allocation")
+    ax.set_title(f"{baseline_name} vs {target_name} Continuous 5-Year Test Equity Curve")
     set_axis_labels_horizontal(ax, "Date", "Asset Allocation (initial = 1.0)", ylabel_pad=95)
     ax.legend()
     plt.tight_layout()
@@ -1463,66 +1460,21 @@ if __name__ == "__main__":
         print(f"REWARD_TYPE = {REWARD_TYPE}")
         print(f"期間        = {ROLLING_START_DATE} ~ {ROLLING_END_DATE}")
         print(f"Train/Test  = {TRAIN_YEARS}y / {TEST_YEARS}y, shift {SHIFT_YEARS}y")
-        print(f"Backtest repeats = {REPEAT_EXPERIMENTS}")
-        print(f"Train seed       = {TRAIN_RANDOM_SEED}")
+        print(f"Train/backtest repeats = {REPEAT_EXPERIMENTS}")
         print(f"Root             = {rolling_root}")
-        print("流程：每個 window 只 train 一次 PPO model，train 完後再 test repeat 5 次")
+        print("流程：每個 window 的每個 repeat 都 train 一個 PPO model，並 backtest 一次")
         print("========================================\n")
 
         summary_rows: list[dict[str, Any]] = []
 
-        # 正確順序：每個 window 先 train 一次，再用同一個 model 做 5 次 backtest。
+        # 正確順序：每個 window 的每個 repeat 都先 train 一個新 model，接著只 backtest 一次。
         for window in windows:
             window_dir = rolling_root / window_folder_name(window)
-            train_experiment_dir = window_dir / f"train_once_seed_{TRAIN_RANDOM_SEED}"
-            train_experiment_dir.mkdir(parents=True, exist_ok=True)
-
-            train_config = {
-                **base_experiment_config(),
-                **window,
-                "rolling_root": str(rolling_root),
-                "window_dir": str(window_dir),
-                "experiment_dir": str(train_experiment_dir),
-                "random_seed": TRAIN_RANDOM_SEED,
-                "train_period": f"{window['train_start_year']}-{window['train_end_year']}",
-                "test_period": f"{window['test_start_year']}-{window['test_end_year']}",
-                "stage": "train_once",
-            }
-            save_json(train_experiment_dir / "experiment_config.json", train_config)
-
-            print("=" * 80)
-            print(f"Window {window['window_id']:02d}: train PPO once, seed {TRAIN_RANDOM_SEED}")
-            print(f"Train: {window['train_start_date']} ~ {window['train_end_date']}")
-            print(f"Test : {window['test_start_date']} ~ {window['test_end_date']}")
-            print(f"Train Dir: {train_experiment_dir}")
-            print("=" * 80)
-
-            train_env = build_child_environment(
-                experiment_dir=train_experiment_dir,
-                train_start_date=window["train_start_date"],
-                train_end_date=window["train_end_date"],
-                test_start_date=window["test_start_date"],
-                test_end_date=window["test_end_date"],
-                trade_start_date=window["trade_start_date"],
-                trade_end_date=window["trade_end_date"],
-                random_seed=TRAIN_RANDOM_SEED,
-                rolling_root_dir=rolling_root,
-                window_dir=window_dir,
-                repeat_index=None,
-                window_id=window["window_id"],
-            )
-
-            if RUN_DATA:
-                run_script("examples/FinRL_StockTrading_2026_1_data.py", train_env, project_root)
-            if RUN_TRAIN:
-                run_script("examples/FinRL_StockTrading_2026_2_train.py", train_env, project_root)
-
-            trained_data_dir = train_experiment_dir / "data"
-            trained_model_dir = train_experiment_dir / "trained_models"
+            window_dir.mkdir(parents=True, exist_ok=True)
 
             for repeat_index in range(1, REPEAT_EXPERIMENTS + 1):
-                test_seed = BASE_RANDOM_SEED + repeat_index
-                experiment_dir = window_dir / repeat_folder_name(repeat_index, test_seed)
+                random_seed = BASE_RANDOM_SEED + repeat_index
+                experiment_dir = window_dir / repeat_folder_name(repeat_index, random_seed)
                 experiment_dir.mkdir(parents=True, exist_ok=True)
 
                 run_config = {
@@ -1530,26 +1482,26 @@ if __name__ == "__main__":
                     **window,
                     "rolling_root": str(rolling_root),
                     "window_dir": str(window_dir),
-                    "train_experiment_dir": str(train_experiment_dir),
                     "experiment_dir": str(experiment_dir),
                     "repeat_index": repeat_index,
-                    "random_seed": test_seed,
-                    "train_random_seed": TRAIN_RANDOM_SEED,
+                    "random_seed": random_seed,
                     "train_period": f"{window['train_start_year']}-{window['train_end_year']}",
                     "test_period": f"{window['test_start_year']}-{window['test_end_year']}",
-                    "stage": "backtest_repeat",
+                    "stage": "train_and_backtest_repeat",
                 }
                 save_json(experiment_dir / "experiment_config.json", run_config)
 
-                print("-" * 80)
+                print("=" * 80)
                 print(
-                    f"Window {window['window_id']:02d}, test repeat {repeat_index:02d}, "
-                    f"test seed {test_seed}, model seed {TRAIN_RANDOM_SEED}"
+                    f"Window {window['window_id']:02d}, repeat {repeat_index:02d}, "
+                    f"train/backtest seed {random_seed}"
                 )
-                print(f"Backtest Dir: {experiment_dir}")
-                print("-" * 80)
+                print(f"Train: {window['train_start_date']} ~ {window['train_end_date']}")
+                print(f"Test : {window['test_start_date']} ~ {window['test_end_date']}")
+                print(f"Repeat Dir: {experiment_dir}")
+                print("=" * 80)
 
-                test_env = build_child_environment(
+                child_env = build_child_environment(
                     experiment_dir=experiment_dir,
                     train_start_date=window["train_start_date"],
                     train_end_date=window["train_end_date"],
@@ -1557,38 +1509,31 @@ if __name__ == "__main__":
                     test_end_date=window["test_end_date"],
                     trade_start_date=window["trade_start_date"],
                     trade_end_date=window["trade_end_date"],
-                    random_seed=test_seed,
+                    random_seed=random_seed,
                     rolling_root_dir=rolling_root,
                     window_dir=window_dir,
                     repeat_index=repeat_index,
                     window_id=window["window_id"],
                 )
 
-                # Backtest repeat 使用同一份 data 與同一個 trained PPO model。
-                test_env["TRAIN_DATA_PATH"] = str(trained_data_dir / "train_data.csv")
-                test_env["TRADE_DATA_PATH"] = str(trained_data_dir / "trade_data.csv")
-                test_env["TRAINED_MODEL_DIR"] = str(trained_model_dir)
-
-                if RUN_BACKTEST:
-                    run_script("examples/FinRL_StockTrading_2026_3_Backtest.py", test_env, project_root)
+                for script in scripts_to_run():
+                    run_script(script, child_env, project_root)
 
                 backtest_summary = collect_backtest_summary(experiment_dir)
                 summary_rows.append(
                     {
                         "window_id": window["window_id"],
                         "repeat_index": repeat_index,
-                        "random_seed": test_seed,
-                        "train_random_seed": TRAIN_RANDOM_SEED,
+                        "random_seed": random_seed,
                         "train_period": f"{window['train_start_year']}-{window['train_end_year']}",
                         "test_period": f"{window['test_start_year']}-{window['test_end_year']}",
-                        "train_experiment_dir": str(train_experiment_dir),
                         "experiment_dir": str(experiment_dir),
                         **backtest_summary,
                     }
                 )
                 write_rolling_summaries(rolling_root, summary_rows)
 
-            plot_window_repeat_aggregate(window_dir, REWARD_TYPE)
+            plot_window_annual_reset_aggregate(window_dir, REWARD_TYPE)
 
         if RUN_CONTINUOUS_5Y_TEST:
             run_continuous_5y_test(rolling_root, windows, REWARD_TYPE)
