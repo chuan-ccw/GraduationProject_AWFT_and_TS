@@ -407,9 +407,14 @@ def collect_continuous_5y_series(rolling_root: Path, reward_type: str) -> pd.Dat
     out = keep_valid_date_rows(df.copy())
     if out.empty:
         raise ValueError(f"{csv_path} 沒有有效日期列。")
-    out["ppo_mean_norm"] = pd.to_numeric(out["ppo_continuous_norm"], errors="coerce")
-    out["ppo_min_norm"] = out["ppo_mean_norm"]
-    out["ppo_max_norm"] = out["ppo_mean_norm"]
+    # New continuous output stores the 5-repeat mean/min/max.
+    # Fallback to ppo_continuous_norm keeps older result folders readable.
+    mean_col = "ppo_continuous_mean_norm" if "ppo_continuous_mean_norm" in out.columns else "ppo_continuous_norm"
+    min_col = "ppo_continuous_min_norm" if "ppo_continuous_min_norm" in out.columns else mean_col
+    max_col = "ppo_continuous_max_norm" if "ppo_continuous_max_norm" in out.columns else mean_col
+    out["ppo_mean_norm"] = pd.to_numeric(out[mean_col], errors="coerce")
+    out["ppo_min_norm"] = pd.to_numeric(out[min_col], errors="coerce")
+    out["ppo_max_norm"] = pd.to_numeric(out[max_col], errors="coerce")
     out["source_window"] = "continuous_5y_test"
     out["source_csv"] = str(csv_path)
     out = out.sort_values("date").reset_index(drop=True)

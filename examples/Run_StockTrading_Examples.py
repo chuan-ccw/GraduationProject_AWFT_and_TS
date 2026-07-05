@@ -266,9 +266,11 @@ RUN_BACKTEST = True
 AUTO_COMPARE_LATEST = False
 
 # 連續 5 年 test：
-#   False = 保持 Annual Reset 流程。
-#   True  = rolling 結束後額外跑一次連續 test，上一個 window 的 cash/holdings 會接到下一個 window。
-RUN_CONTINUOUS_5Y_TEST = False
+#   False = 只跑 Annual Reset。
+#   True  = Annual Reset 跑完後，額外對 repeat_01~repeat_05 各跑一次連續 5 年 test。
+#           同一個 repeat 會把上一個 window 的 final cash/holdings 接到下一個 window，
+#           最後再把 5 條 continuous equity curve 做平均。
+RUN_CONTINUOUS_5Y_TEST = True
 
 # 若 RUN_CONTINUOUS_5Y_TEST=True，且 v0 與目前 REWARD_TYPE 都已有 continuous_5y_test 結果，
 # 可自動產生連續 5 年的 compare_portfolio_value.png。
@@ -1223,6 +1225,11 @@ def run_continuous_5y_test(
     ppo_norm_df = pd.concat(ppo_norm_runs, axis=1)
 
     result = pd.DataFrame({"date": base_dates})
+    for col in ppo_df.columns:
+        result[col] = ppo_df[col].to_numpy()
+    for col in ppo_norm_df.columns:
+        result[col] = ppo_norm_df[col].to_numpy()
+
     result["ppo_continuous"] = ppo_df.mean(axis=1)
     result["ppo_continuous_mean"] = result["ppo_continuous"]
     result["ppo_continuous_min"] = ppo_df.min(axis=1)
@@ -1298,7 +1305,7 @@ def run_continuous_5y_test(
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     save_json(out_dir / "continuous_config.json", config_payload)
-    print(f"Continuous 5-year Annual Reset test saved to: {out_dir}")
+    print(f"Continuous 5-year repeat-mean test saved to: {out_dir}")
 
 def _collect_continuous_5y_series(rolling_root: Path, reward_type: str) -> pd.DataFrame | None:
     csv_path = rolling_root / CONTINUOUS_TEST_DIR_NAME / "continuous_portfolio_value.csv"
