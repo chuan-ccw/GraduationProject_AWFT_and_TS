@@ -30,7 +30,7 @@ from finrl import config
 #   "v3" = sum(action * future n-day average simple return)
 #   "v4" = sum(delta action * future n-day average simple return)
 
-REWARD_TYPE = "v4"
+REWARD_TYPE = "v0"
 
 REWARD_PARAMS_BY_TYPE = {
     "v0": {},
