@@ -382,6 +382,12 @@ def collect_annual_reset_series(rolling_root: Path, reward_type: str) -> pd.Data
         raise ValueError(f"annual_reset_{reward_type} 的 backtest_result.csv 沒有有效日期列。")
     out = out.drop_duplicates(subset=["date"], keep="last")
     out = out.sort_values("date").reset_index(drop=True)
+    out = ensure_strategy_compare_columns(out)
+    if "strategy_mean_norm" not in out.columns:
+        raise KeyError(
+            f"annual_reset_{reward_type} 的 backtest_result.csv 缺少 strategy_mean_norm，"
+            f"也找不到 PPO/REINFORCE 可轉換欄位。columns={list(out.columns)}"
+        )
     out.attrs["source_csvs"] = source_csvs
     return out
 
@@ -401,26 +407,70 @@ def collect_continuous_5y_series(rolling_root: Path, reward_type: str) -> pd.Dat
         raise ValueError(f"{csv_path} 是空的。")
     if "date" not in df.columns:
         raise KeyError(f"{csv_path} 缺少 date 欄位。")
-    if "ppo_continuous_norm" not in df.columns:
-        raise KeyError(f"{csv_path} 缺少 ppo_continuous_norm 欄位。")
 
     out = keep_valid_date_rows(df.copy())
     if out.empty:
         raise ValueError(f"{csv_path} 沒有有效日期列。")
-    # New continuous output stores the 5-repeat mean/min/max.
-    # Fallback to ppo_continuous_norm keeps older result folders readable.
-    mean_col = "ppo_continuous_mean_norm" if "ppo_continuous_mean_norm" in out.columns else "ppo_continuous_norm"
-    min_col = "ppo_continuous_min_norm" if "ppo_continuous_min_norm" in out.columns else mean_col
-    max_col = "ppo_continuous_max_norm" if "ppo_continuous_max_norm" in out.columns else mean_col
-    out["ppo_mean_norm"] = pd.to_numeric(out[mean_col], errors="coerce")
-    out["ppo_min_norm"] = pd.to_numeric(out[min_col], errors="coerce")
-    out["ppo_max_norm"] = pd.to_numeric(out[max_col], errors="coerce")
+    out = ensure_strategy_compare_columns(out)
+    if "strategy_mean_norm" not in out.columns:
+        raise KeyError(
+            f"{csv_path} 缺少可比較的策略欄位。"
+            "需要 strategy_continuous_norm / strategy_continuous_mean_norm，"
+            "或 ppo/reinforce_continuous_norm 欄位。"
+        )
     out["source_window"] = "continuous_5y_test"
     out["source_csv"] = str(csv_path)
     out = out.sort_values("date").reset_index(drop=True)
     out.attrs["source_csvs"] = [str(csv_path)]
     return out
 
+
+
+COMPARE_AGENT_PREFIXES = ["strategy", "ppo", "reinforce", "a2c", "ddpg", "td3", "sac"]
+
+
+def ensure_strategy_compare_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize PPO/REINFORCE annual-reset outputs to generic strategy columns."""
+    out = df.copy()
+
+    # Annual Reset aggregate columns:
+    #   strategy_mean_norm / strategy_min_norm / strategy_max_norm
+    # Older PPO-only outputs may use ppo_*; REINFORCE outputs may use reinforce_*.
+    if "strategy_mean_norm" not in out.columns:
+        for prefix in COMPARE_AGENT_PREFIXES:
+            mean_col = f"{prefix}_mean_norm"
+            if mean_col not in out.columns:
+                continue
+            for suffix in ["mean", "min", "max", "mean_norm", "min_norm", "max_norm"]:
+                source_col = f"{prefix}_{suffix}"
+                target_col = f"strategy_{suffix}"
+                if source_col in out.columns and target_col not in out.columns:
+                    out[target_col] = out[source_col]
+            break
+
+    # Continuous 5-year aggregate columns are also normalized here so this
+    # compare script works for PPO and REINFORCE results.
+    if "strategy_mean_norm" not in out.columns:
+        for prefix in COMPARE_AGENT_PREFIXES:
+            mean_col = f"{prefix}_continuous_mean_norm"
+            if mean_col not in out.columns:
+                mean_col = f"{prefix}_continuous_norm"
+            if mean_col not in out.columns:
+                continue
+            min_col = f"{prefix}_continuous_min_norm" if f"{prefix}_continuous_min_norm" in out.columns else mean_col
+            max_col = f"{prefix}_continuous_max_norm" if f"{prefix}_continuous_max_norm" in out.columns else mean_col
+            out["strategy_mean_norm"] = pd.to_numeric(out[mean_col], errors="coerce")
+            out["strategy_min_norm"] = pd.to_numeric(out[min_col], errors="coerce")
+            out["strategy_max_norm"] = pd.to_numeric(out[max_col], errors="coerce")
+            break
+
+    if "strategy_mean_norm" in out.columns:
+        if "strategy_min_norm" not in out.columns:
+            out["strategy_min_norm"] = out["strategy_mean_norm"]
+        if "strategy_max_norm" not in out.columns:
+            out["strategy_max_norm"] = out["strategy_mean_norm"]
+
+    return out
 
 def collect_compare_series(rolling_root: Path, reward_type: str, compare_data_mode: str) -> pd.DataFrame:
     """Collect compare source according to COMPARE_DATA_MODE."""
@@ -495,7 +545,7 @@ def make_compare_dir(root_v0: Path, root_target: Path, target_reward_type: str, 
 
 def _select_cols(df: pd.DataFrame) -> list[str]:
     return [
-        c for c in ["date", "ppo_mean_norm", "ppo_min_norm", "ppo_max_norm", "dji_mean_norm"]
+        c for c in ["date", "strategy_mean_norm", "strategy_min_norm", "strategy_max_norm", "dji_mean_norm"]
         if c in df.columns
     ]
 
@@ -511,7 +561,7 @@ def build_compare_dataframe(df_v0: pd.DataFrame, df_target: pd.DataFrame, target
     ).sort_values("date").reset_index(drop=True)
 
     # If a column did not overlap, pandas may leave it unsuffixed. Normalize names for downstream plotting.
-    for base in ["ppo_mean_norm", "ppo_min_norm", "ppo_max_norm"]:
+    for base in ["strategy_mean_norm", "strategy_min_norm", "strategy_max_norm"]:
         plain = base
         target_name = f"{base}_{target_reward_type}"
         if plain in merged.columns and target_name not in merged.columns:
@@ -543,9 +593,9 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_ta
     target_name = reward_display_name(target_reward_type)
 
     def add_strategy(prefix: str, color: str, label: str) -> None:
-        mean_col = f"ppo_mean_norm_{prefix}"
-        min_col = f"ppo_min_norm_{prefix}"
-        max_col = f"ppo_max_norm_{prefix}"
+        mean_col = f"strategy_mean_norm_{prefix}"
+        min_col = f"strategy_min_norm_{prefix}"
+        max_col = f"strategy_max_norm_{prefix}"
         if mean_col not in merged.columns:
             return
         mean = pd.to_numeric(merged[mean_col], errors="coerce")
@@ -567,7 +617,7 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_ta
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1)
     set_month_xticklabels(ax, merged["date"].tolist(), max_xticks=MAX_XTICKS)
 
-    title_mode = "Continuous 5-Year Test" if compare_data_mode in {"continuous", "continuous_5y", "continuous5y"} else "Repeat-Mean"
+    title_mode = "Continuous 5-Year Test" if compare_data_mode in {"continuous", "continuous_5y", "continuous5y"} else "Annual Reset"
     ax.set_title(f"{baseline_name} vs {target_name} {title_mode} Equity Curve")
     set_axis_labels_horizontal(ax, "Date", "Asset Allocation (initial = 1.0)", ylabel_pad=95)
     ax.legend()
@@ -580,8 +630,8 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_ta
 def write_summary(merged: pd.DataFrame, compare_dir: Path, root_v0: Path, root_target: Path, target_reward_type: str, compare_data_mode: str) -> None:
     rows = []
     for label, col in [
-        ("v0", "ppo_mean_norm_v0"),
-        (target_reward_type, f"ppo_mean_norm_{target_reward_type}"),
+        ("v0", "strategy_mean_norm_v0"),
+        (target_reward_type, f"strategy_mean_norm_{target_reward_type}"),
         ("dji", "dji_mean_norm"),
     ]:
         if col in merged.columns:

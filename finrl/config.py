@@ -11,8 +11,8 @@ RESULTS_DIR = "results"
 # For reward v2: use REWARD_TYPE = "v2"
 # For reward v3: use REWARD_TYPE = "v3"
 # For reward v4: use REWARD_TYPE = "v4"
-REWARD_TYPE = "v4"
-REWARD_PARAMS = {"n_future": 5, "price_col": "close"}
+REWARD_TYPE = "v0"
+REWARD_PARAMS = {"n_future": 5, "price_col": "close", "c": 0.05}
 EXPERIMENT_ROOT = r"C:\Users\User\Desktop\GraduationProject\Experence_result"
 
 # date format: '%Y-%m-%d'

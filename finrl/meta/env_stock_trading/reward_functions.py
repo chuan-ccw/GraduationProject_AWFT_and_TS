@@ -272,42 +272,128 @@ def reward_v3(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     return float(np.sum(action_units[valid] * simple_returns[valid]))
 
 
+
+def _reset_reward_v4_diagnostics(env: Any) -> dict[str, float]:
+    """Reset per-episode statistics used to diagnose reward v4."""
+    diagnostics = {
+        "diagnostic_step_count": 0.0,
+        "valid_action_count": 0.0,
+        "zero_delta_count": 0.0,
+        "sum_abs_delta_a": 0.0,
+        "sum_abs_effective_delta_a": 0.0,
+        "sum_abs_future_return": 0.0,
+        "positive_reward_count": 0.0,
+        "positive_step_reward_count": 0.0,
+        "zero_delta_ratio": 0.0,
+        "mean_abs_delta_a": 0.0,
+        "mean_abs_effective_delta_a": 0.0,
+        "mean_abs_future_return": 0.0,
+        "positive_reward_ratio": 0.0,
+        "positive_step_reward_ratio": 0.0,
+    }
+    env._reward_v4_diagnostics = diagnostics
+    return diagnostics
+
+
+def _update_reward_v4_diagnostics(
+    env: Any,
+    delta_a: np.ndarray,
+    effective_delta_a: np.ndarray,
+    future_avg_returns: np.ndarray,
+    zero_delta_mask: np.ndarray,
+    valid: np.ndarray,
+) -> None:
+    """Accumulate reward v4 diagnostics for the current episode.
+
+    positive_reward_ratio is the proportion of valid stock-level reward
+    contributions whose value is greater than zero.
+    """
+    diagnostics = getattr(env, "_reward_v4_diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        diagnostics = _reset_reward_v4_diagnostics(env)
+
+    valid_count = int(np.sum(valid))
+    if valid_count <= 0:
+        return
+
+    contributions = effective_delta_a[valid] * future_avg_returns[valid]
+    step_reward = float(np.sum(contributions))
+
+    diagnostics["diagnostic_step_count"] += 1.0
+    diagnostics["valid_action_count"] += float(valid_count)
+    diagnostics["zero_delta_count"] += float(np.sum(zero_delta_mask & valid))
+    diagnostics["sum_abs_delta_a"] += float(np.sum(np.abs(delta_a[valid])))
+    diagnostics["sum_abs_effective_delta_a"] += float(
+        np.sum(np.abs(effective_delta_a[valid]))
+    )
+    diagnostics["sum_abs_future_return"] += float(
+        np.sum(np.abs(future_avg_returns[valid]))
+    )
+    diagnostics["positive_reward_count"] += float(np.sum(contributions > 0.0))
+    diagnostics["positive_step_reward_count"] += float(step_reward > 0.0)
+
+    action_count = diagnostics["valid_action_count"]
+    step_count = diagnostics["diagnostic_step_count"]
+    diagnostics["zero_delta_ratio"] = diagnostics["zero_delta_count"] / action_count
+    diagnostics["mean_abs_delta_a"] = diagnostics["sum_abs_delta_a"] / action_count
+    diagnostics["mean_abs_effective_delta_a"] = (
+        diagnostics["sum_abs_effective_delta_a"] / action_count
+    )
+    diagnostics["mean_abs_future_return"] = (
+        diagnostics["sum_abs_future_return"] / action_count
+    )
+    diagnostics["positive_reward_ratio"] = (
+        diagnostics["positive_reward_count"] / action_count
+    )
+    diagnostics["positive_step_reward_ratio"] = (
+        diagnostics["positive_step_reward_count"] / step_count
+    )
+
+
 def reward_v4(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float:
     """
     Jason reward v4.
 
-    使用 action value 變化量與未來 n 天平均價格報酬計算 reward。
+    使用有效 action value 變化量與未來 n 天平均價格報酬計算 reward。
 
     Formula:
-        R_t = sum_i effective_a(i,t) * r_avg(i,t)
+        R_t = sum_i effective_delta_a(i,t) * future_avg_returns(i,t)
 
-        effective_a(i,t) = delta_a(i,t), if delta_a(i,t) != 0
-        effective_a(i,t) = a(i,t),       if delta_a(i,t) == 0
+        effective_delta_a(i,t) = delta_a(i,t),
+                                 if abs(delta_a(i,t)) > eps
+
+        effective_delta_a(i,t) = c * sign(a(i,t)),
+                                 if abs(delta_a(i,t)) <= eps
 
         delta_a(i,t) = a(i,t) - a(i,t-1)
 
-        r_avg(i,t) = (avg_p(i,t)^n - p(i,t)) / p(i,t)
+        future_avg_returns(i,t)
+            = (avg_p(i,t)^n - p(i,t)) / p(i,t)
 
         avg_p(i,t)^n = 1/n * sum_{k=t+1}^{t+n} p(i,k)
 
     其中：
         a(i,t): 第 i 檔股票在第 t 天的 action value, range = [-1, 1]
         delta_a(i,t): 第 i 檔股票在第 t 天相對於第 t-1 天的 action value 變化量
+        c: delta_a(i,t) 接近 0 時使用的小幅有效 action 變化量
         p(i,t): 第 i 檔股票在第 t 天的價格
         avg_p(i,t)^n: 第 i 檔股票未來 n 天平均價格
 
     Meaning:
-        If future average price is higher and action increases, reward is positive.
-        If future average price is lower and action decreases, reward is positive.
-        If action does not change, fall back to the current action direction.
-        This encourages correct position adjustment direction while still scoring
-        unchanged positions by their current action direction.
+        If delta_a(i,t) changes, keep using delta_a(i,t).
+        If delta_a(i,t) is approximately zero, use c times the sign of the
+        current action only for reward calculation. The actual action sent to
+        the environment is not modified.
     """
     params = params or {}
 
     eps = params.get("eps", 1e-8)
     n_future = int(params.get("n_future", 5))
     price_col = params.get("price_col", "close")
+    c = float(params.get("c", 0.05))
+
+    if not 0.0 <= c <= 1.0:
+        raise ValueError("reward_v4 parameter 'c' must be in [0, 1].")
 
     current_action_units = _action_to_unit_array(ctx.raw_actions, ctx.env.hmax, eps)
     previous_action_units = getattr(ctx.env, "_reward_v4_previous_action_units", None)
@@ -321,11 +407,15 @@ def reward_v4(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     else:
         previous_action_units = np.asarray(previous_action_units, dtype=float)
 
-    delta_action_units = current_action_units - previous_action_units
+    delta_a = current_action_units - previous_action_units
 
     # Keep current action for the next step. This must happen even when the
     # future window is unavailable near the end of the episode.
     ctx.env._reward_v4_previous_action_units = current_action_units.copy()
+
+    # current_day == 0 means a new training/evaluation episode has started.
+    if ctx.current_day == 0:
+        _reset_reward_v4_diagnostics(ctx.env)
 
     price_matrix, day_to_pos = _get_price_matrix(ctx.env, ctx.tic_list, price_col)
 
@@ -343,17 +433,21 @@ def reward_v4(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     avg_future_prices = np.nanmean(future_window, axis=0)
 
     future_avg_returns = (avg_future_prices - current_prices) / (current_prices + eps)
-    effective_action_units = np.where(
-        np.isclose(delta_action_units, 0.0, atol=eps),
-        current_action_units,
-        delta_action_units,
+
+    # delta_a 接近 0 時，只在 reward 計算中使用 c * sign(current action)。
+    # 不修改實際送進環境的 action。
+    zero_delta_mask = np.isclose(delta_a, 0.0, atol=eps, rtol=0.0)
+    effective_delta_a = np.where(
+        zero_delta_mask,
+        c * np.sign(current_action_units),
+        delta_a,
     )
 
     valid = (
         np.isfinite(current_prices)
         & np.isfinite(avg_future_prices)
         & np.isfinite(future_avg_returns)
-        & np.isfinite(effective_action_units)
+        & np.isfinite(effective_delta_a)
         & np.all(np.isfinite(future_window), axis=0)
         & (current_prices > eps)
         & (avg_future_prices > eps)
@@ -362,7 +456,16 @@ def reward_v4(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     if not np.any(valid):
         return 0.0
 
-    return float(np.sum(effective_action_units[valid] * future_avg_returns[valid]))
+    _update_reward_v4_diagnostics(
+        env=ctx.env,
+        delta_a=delta_a,
+        effective_delta_a=effective_delta_a,
+        future_avg_returns=future_avg_returns,
+        zero_delta_mask=zero_delta_mask,
+        valid=valid,
+    )
+
+    return float(np.sum(effective_delta_a[valid] * future_avg_returns[valid]))
 
 
 REWARD_FUNCTIONS = {

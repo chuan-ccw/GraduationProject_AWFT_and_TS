@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 
 import matplotlib
 matplotlib.use("Agg")
@@ -28,7 +30,7 @@ from finrl import config
 #   "v1" = simple return + buy low score + sell high score
 #   "v2" = sum(action * future t+n day simple return)
 #   "v3" = sum(action * future n-day average simple return)
-#   "v4" = sum(delta action * future n-day average simple return)
+#   "v4" = sum(effective delta action * future n-day average simple return)
 
 REWARD_TYPE = "v0"
 
@@ -50,6 +52,7 @@ REWARD_PARAMS_BY_TYPE = {
     "v4": {
         "n_future": 5,
         "price_col": "close",
+        "c": 0.05,
     },
 }
 
@@ -215,6 +218,26 @@ def select_backtest_result_csv(repeat_dir: Path, reward_type: str) -> Path | Non
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def select_training_reward_curve_csv(repeat_dir: Path, agent_name: str) -> Path | None:
+    """Select one training reward curve CSV from a repeat folder."""
+    canonical_path = repeat_dir / "reward_curve.csv"
+    if canonical_path.exists():
+        return canonical_path
+
+    candidates = sorted(repeat_dir.glob(f"training_reward_curve_{agent_name}_*.csv"))
+    return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
+
+
+def select_deterministic_eval_curve_csv(repeat_dir: Path) -> Path | None:
+    """Select one periodic deterministic evaluation curve from a repeat folder."""
+    canonical_path = repeat_dir / "deterministic_eval_curve.csv"
+    if canonical_path.exists():
+        return canonical_path
+
+    candidates = sorted(repeat_dir.glob("deterministic_eval_curve_reinforce_*.csv"))
+    return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
+
+
 def cleanup_unused_compare_images(compare_dir: Path) -> None:
     """Remove old compare image aliases that are no longer generated."""
     for name in UNUSED_COMPARE_IMAGE_NAMES:
@@ -222,6 +245,11 @@ def cleanup_unused_compare_images(compare_dir: Path) -> None:
         if path.exists():
             path.unlink()
 
+
+# 小型診斷模式：只跑第一個 window、1 次 repeat，並縮短主要 Agent 的訓練步數。
+# 診斷完成後改成 False，即可恢復下方的正式 rolling 實驗設定。
+SMALL_DIAGNOSTIC_EXPERIMENT = False
+DIAGNOSTIC_WINDOW_COUNT = 1
 
 # Rolling Window 設定
 ROLLING_WINDOW_MODE = True
@@ -232,11 +260,11 @@ TEST_YEARS = 1
 SHIFT_YEARS = 1
 
 # 每個 rolling window 的 repeat 次數
-# 注意：每個 repeat 都會 train 一個新的 PPO model，然後只 backtest 一次。
-REPEAT_EXPERIMENTS = 5
+# 注意：每個 repeat 都會 train 一個新的 model，然後只 backtest 一次。
+REPEAT_EXPERIMENTS = 1 if SMALL_DIAGNOSTIC_EXPERIMENT else 5
 BASE_RANDOM_SEED = 42
 
-# False = 測試時從 PPO policy 分布抽樣。
+# False = 測試時從 policy 分布抽樣。
 # True  = 測試時固定選最可能的 action，讓同一個 model + state 的結果可重現。
 TEST_PREDICT_DETERMINISTIC = True
 
@@ -270,25 +298,116 @@ AUTO_COMPARE_LATEST = False
 #   True  = Annual Reset 跑完後，額外對 repeat_01~repeat_05 各跑一次連續 5 年 test。
 #           同一個 repeat 會把上一個 window 的 final cash/holdings 接到下一個 window，
 #           最後再把 5 條 continuous equity curve 做平均。
-RUN_CONTINUOUS_5Y_TEST = True
+RUN_CONTINUOUS_5Y_TEST = False if SMALL_DIAGNOSTIC_EXPERIMENT else True
 
 # 若 RUN_CONTINUOUS_5Y_TEST=True，且 v0 與目前 REWARD_TYPE 都已有 continuous_5y_test 結果，
 # 可自動產生連續 5 年的 compare_portfolio_value.png。
 AUTO_COMPARE_CONTINUOUS_LATEST = False
 
 # Agent 開關：train 和 backtest 會共用這裡的設定
+# PRIMARY_AGENT_NAME 會決定 Annual Reset、Continuous 5Y 與 canonical 圖檔使用哪個 Agent。
+# 若指定的 Agent 沒有開啟，程式會自動改用第一個已開啟的 Agent。
+PRIMARY_AGENT_NAME = "ppo"
 IF_USING_A2C = False
 IF_USING_DDPG = False
 IF_USING_PPO = True
+IF_USING_REINFORCE = False
 IF_USING_TD3 = False
 IF_USING_SAC = False
 
 # 訓練步數
 A2C_TOTAL_TIMESTEPS = 20000
 DDPG_TOTAL_TIMESTEPS = 20000
-PPO_TOTAL_TIMESTEPS = 100000
+PPO_TOTAL_TIMESTEPS = 50000 if SMALL_DIAGNOSTIC_EXPERIMENT else 100000
+REINFORCE_TOTAL_TIMESTEPS = 50000 if SMALL_DIAGNOSTIC_EXPERIMENT else 100000
+REINFORCE_EVAL_INTERVAL = 5
 TD3_TOTAL_TIMESTEPS = 20000
 SAC_TOTAL_TIMESTEPS = 20000
+
+AGENT_ORDER = ["a2c", "ddpg", "ppo", "reinforce", "td3", "sac"]
+AGENT_DISPLAY_NAMES = {
+    "a2c": "A2C",
+    "ddpg": "DDPG",
+    "ppo": "PPO",
+    "reinforce": "REINFORCE",
+    "td3": "TD3",
+    "sac": "SAC",
+}
+
+
+def enabled_agent_names() -> list[str]:
+    flags = {
+        "a2c": IF_USING_A2C,
+        "ddpg": IF_USING_DDPG,
+        "ppo": IF_USING_PPO,
+        "reinforce": IF_USING_REINFORCE,
+        "td3": IF_USING_TD3,
+        "sac": IF_USING_SAC,
+    }
+    return [name for name in AGENT_ORDER if flags.get(name, False)]
+
+
+def primary_agent_name() -> str:
+    names = enabled_agent_names()
+    preferred = str(PRIMARY_AGENT_NAME or "").strip().lower()
+    if preferred in names:
+        return preferred
+    return names[0] if names else "ppo"
+
+
+def agent_display_name(agent_name: str) -> str:
+    return AGENT_DISPLAY_NAMES.get(str(agent_name).lower(), str(agent_name).upper())
+
+
+def validate_agent_configuration() -> None:
+    names = enabled_agent_names()
+    if not names:
+        raise ValueError("至少要開啟一個 Agent，例如 IF_USING_PPO=True 或 IF_USING_REINFORCE=True。")
+
+    selected = primary_agent_name()
+    requested = str(PRIMARY_AGENT_NAME or "").strip().lower()
+    if requested and requested != selected:
+        print(
+            f"PRIMARY_AGENT_NAME={requested!r} 沒有開啟，"
+            f"改用 {selected!r} 作為 primary agent。"
+        )
+
+    if RUN_CONTINUOUS_5Y_TEST and selected not in {"ppo", "reinforce"}:
+        raise ValueError(
+            "Continuous 5Y 目前只支援 PPO 或 REINFORCE；"
+            f"目前 primary agent 是 {selected!r}。"
+        )
+
+
+def find_strategy_column(df: pd.DataFrame, preferred_agent: str | None = None) -> str | None:
+    preferred = [preferred_agent] if preferred_agent else []
+    for name in preferred + enabled_agent_names() + AGENT_ORDER:
+        if name and name in df.columns:
+            return name
+    value_cols = [c for c in df.columns if c not in {"date", "dji"}]
+    return value_cols[0] if value_cols else None
+
+
+def ensure_strategy_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Add strategy_* aliases so compare code can read PPO or REINFORCE outputs."""
+    out = df.copy()
+    if "strategy_mean_norm" in out.columns:
+        return out
+
+    suffixes = ["mean", "min", "max", "mean_norm", "min_norm", "max_norm"]
+    candidate_agents = [primary_agent_name()] + AGENT_ORDER
+    for agent_name in candidate_agents:
+        mean_col = f"{agent_name}_mean_norm"
+        if mean_col not in out.columns:
+            continue
+        for suffix in suffixes:
+            source_col = f"{agent_name}_{suffix}"
+            target_col = f"strategy_{suffix}"
+            if source_col in out.columns and target_col not in out.columns:
+                out[target_col] = out[source_col]
+        out.attrs["strategy_agent"] = agent_name
+        return out
+    return out
 
 
 # =====================================================
@@ -378,10 +497,110 @@ def save_json(path: Path, payload: dict[str, Any]) -> None:
         json.dump(payload, f, indent=4, ensure_ascii=False, default=str)
 
 
+def format_elapsed_time(elapsed_seconds: float) -> str:
+    """Format elapsed seconds as HH:MM:SS."""
+    total_seconds = max(0, int(elapsed_seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+class ExperimentTimer:
+    """Track detailed timings and save them even when the run is interrupted."""
+
+    def __init__(self) -> None:
+        self.started_at = datetime.now()
+        self._start_counter = time.perf_counter()
+        self.output_dir: Path | None = None
+        self.rows: list[dict[str, Any]] = []
+        self._finished = False
+
+    def set_output_dir(self, output_dir: Path) -> None:
+        self.output_dir = output_dir
+
+    def add(
+        self,
+        scope: str,
+        elapsed_seconds: float,
+        *,
+        window_id: int | None = None,
+        repeat_index: int | None = None,
+        name: str = "",
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        status: str = "success",
+        returncode: int | None = None,
+    ) -> None:
+        completed_at = completed_at or datetime.now()
+        started_at = started_at or completed_at
+        self.rows.append(
+            {
+                "scope": scope,
+                "window_id": window_id,
+                "repeat_index": repeat_index,
+                "name": name,
+                "start_time": started_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "end_time": completed_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "elapsed_seconds": round(float(elapsed_seconds), 3),
+                "elapsed_hh_mm_ss": format_elapsed_time(elapsed_seconds),
+                "status": status,
+                "returncode": returncode,
+            }
+        )
+
+    def finish(self, status: str = "stopped_before_completion") -> None:
+        if self._finished:
+            return
+        self._finished = True
+
+        completed_at = datetime.now()
+        total_elapsed = time.perf_counter() - self._start_counter
+        self.add(
+            "total_experiment",
+            total_elapsed,
+            name=status,
+            started_at=self.started_at,
+            completed_at=completed_at,
+            status=status,
+        )
+
+        print("\n" + "=" * 80)
+        print(f"Run experiment 開始時間：{self.started_at.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Run experiment 結束時間：{completed_at.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Run experiment 總耗時  ：{format_elapsed_time(total_elapsed)} ({total_elapsed:.2f} 秒)")
+        print("=" * 80)
+
+        if self.output_dir is None:
+            return
+
+        timing_df = pd.DataFrame(self.rows)
+        timing_csv = self.output_dir / "execution_time_summary.csv"
+        detailed_timing_csv = self.output_dir / "timing_log.csv"
+        timing_df.to_csv(timing_csv, index=False, encoding="utf-8-sig")
+        timing_df.to_csv(detailed_timing_csv, index=False, encoding="utf-8-sig")
+        save_json(
+            self.output_dir / "execution_time_summary.json",
+            {
+                "status": status,
+                "started_at": self.started_at.isoformat(timespec="seconds"),
+                "completed_at": completed_at.isoformat(timespec="seconds"),
+                "total_elapsed_seconds": round(total_elapsed, 3),
+                "total_elapsed_hh_mm_ss": format_elapsed_time(total_elapsed),
+                "timing_csv": str(timing_csv),
+                "detailed_timing_csv": str(detailed_timing_csv),
+                "records": self.rows,
+            },
+        )
+        print(f"計時紀錄已儲存：{timing_csv}")
+        print(f"詳細計時紀錄已儲存：{detailed_timing_csv}")
+
+
 def base_experiment_config() -> dict[str, Any]:
     return {
         "reward_type": REWARD_TYPE,
         "reward_params": REWARD_PARAMS,
+        "small_diagnostic_experiment": SMALL_DIAGNOSTIC_EXPERIMENT,
+        "diagnostic_window_count": DIAGNOSTIC_WINDOW_COUNT,
         "rolling_window_mode": ROLLING_WINDOW_MODE,
         "rolling_start_date": ROLLING_START_DATE,
         "rolling_end_date": ROLLING_END_DATE,
@@ -399,11 +618,16 @@ def base_experiment_config() -> dict[str, Any]:
         "if_using_a2c": IF_USING_A2C,
         "if_using_ddpg": IF_USING_DDPG,
         "if_using_ppo": IF_USING_PPO,
+        "if_using_reinforce": IF_USING_REINFORCE,
+        "primary_agent_name": primary_agent_name(),
+        "enabled_agent_names": enabled_agent_names(),
         "if_using_td3": IF_USING_TD3,
         "if_using_sac": IF_USING_SAC,
         "a2c_total_timesteps": A2C_TOTAL_TIMESTEPS,
         "ddpg_total_timesteps": DDPG_TOTAL_TIMESTEPS,
         "ppo_total_timesteps": PPO_TOTAL_TIMESTEPS,
+        "reinforce_total_timesteps": REINFORCE_TOTAL_TIMESTEPS,
+        "reinforce_eval_interval": REINFORCE_EVAL_INTERVAL,
         "td3_total_timesteps": TD3_TOTAL_TIMESTEPS,
         "sac_total_timesteps": SAC_TOTAL_TIMESTEPS,
         "created_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -464,12 +688,16 @@ def build_child_environment(
     env["IF_USING_A2C"] = str(IF_USING_A2C)
     env["IF_USING_DDPG"] = str(IF_USING_DDPG)
     env["IF_USING_PPO"] = str(IF_USING_PPO)
+    env["IF_USING_REINFORCE"] = str(IF_USING_REINFORCE)
+    env["PRIMARY_AGENT_NAME"] = primary_agent_name()
     env["IF_USING_TD3"] = str(IF_USING_TD3)
     env["IF_USING_SAC"] = str(IF_USING_SAC)
 
     env["A2C_TOTAL_TIMESTEPS"] = str(A2C_TOTAL_TIMESTEPS)
     env["DDPG_TOTAL_TIMESTEPS"] = str(DDPG_TOTAL_TIMESTEPS)
     env["PPO_TOTAL_TIMESTEPS"] = str(PPO_TOTAL_TIMESTEPS)
+    env["REINFORCE_TOTAL_TIMESTEPS"] = str(REINFORCE_TOTAL_TIMESTEPS)
+    env["REINFORCE_EVAL_INTERVAL"] = str(REINFORCE_EVAL_INTERVAL)
     env["TD3_TOTAL_TIMESTEPS"] = str(TD3_TOTAL_TIMESTEPS)
     env["SAC_TOTAL_TIMESTEPS"] = str(SAC_TOTAL_TIMESTEPS)
 
@@ -484,9 +712,21 @@ def build_child_environment(
 # 4. 執行子程式
 # =====================================================
 
-def run_script(script_name: str, env: dict[str, str], project_root: Path) -> None:
+def run_script(
+    script_name: str,
+    env: dict[str, str],
+    project_root: Path,
+    timer: ExperimentTimer,
+    *,
+    window_id: int | None = None,
+    repeat_index: int | None = None,
+) -> float:
+    script_started_at = datetime.now()
+    script_start_counter = time.perf_counter()
+
     print("========================================")
     print(f"正在執行: {script_name}")
+    print(f"開始時間: {script_started_at.strftime('%Y-%m-%d %H:%M:%S')}")
     print("========================================")
 
     try:
@@ -497,15 +737,58 @@ def run_script(script_name: str, env: dict[str, str], project_root: Path) -> Non
             env=env,
             cwd=project_root,
         )
-        print(f"✓ {script_name} 執行成功！\n")
     except subprocess.CalledProcessError as e:
+        elapsed = time.perf_counter() - script_start_counter
+        completed_at = datetime.now()
+        timer.add(
+            "script",
+            elapsed,
+            window_id=window_id,
+            repeat_index=repeat_index,
+            name=script_name,
+            started_at=script_started_at,
+            completed_at=completed_at,
+            status="failed",
+            returncode=e.returncode,
+        )
         print(f"❌ {script_name} 執行失敗！錯誤碼: {e.returncode}")
+        print(f"失敗前耗時: {format_elapsed_time(elapsed)} ({elapsed:.2f} 秒)")
         print("停止執行後續檔案。")
         sys.exit(1)
     except FileNotFoundError:
+        elapsed = time.perf_counter() - script_start_counter
+        completed_at = datetime.now()
+        timer.add(
+            "script",
+            elapsed,
+            window_id=window_id,
+            repeat_index=repeat_index,
+            name=script_name,
+            started_at=script_started_at,
+            completed_at=completed_at,
+            status="file_not_found",
+        )
         print(f"❌ 找不到檔案: {script_name}，請檢查路徑是否正確。")
+        print(f"失敗前耗時: {format_elapsed_time(elapsed)} ({elapsed:.2f} 秒)")
         print("停止執行後續檔案。")
         sys.exit(1)
+
+    elapsed = time.perf_counter() - script_start_counter
+    completed_at = datetime.now()
+    timer.add(
+        "script",
+        elapsed,
+        window_id=window_id,
+        repeat_index=repeat_index,
+        name=script_name,
+        started_at=script_started_at,
+        completed_at=completed_at,
+        status="success",
+        returncode=0,
+    )
+    print(f"✓ {script_name} 執行成功！")
+    print(f"耗時: {format_elapsed_time(elapsed)} ({elapsed:.2f} 秒)\n")
+    return elapsed
 
 
 def scripts_to_run() -> list[str]:
@@ -543,8 +826,14 @@ def write_rolling_summaries(rolling_root: Path, summary_rows: list[dict[str, Any
 
     numeric_cols = [
         col
-        for col in ["final_ppo", "ppo_return", "ppo_max_drawdown", "final_dji"]
-        if col in summary_df.columns
+        for col in summary_df.columns
+        if (
+            col == "final_dji"
+            or col.startswith("initial_")
+            or col.startswith("final_")
+            or col.endswith("_return")
+            or col.endswith("_max_drawdown")
+        )
     ]
     if numeric_cols:
         agg = (
@@ -614,7 +903,7 @@ def plot_window_annual_reset_aggregate(window_dir: Path, reward_type: str) -> No
 
     Output folder:
       annual_reset_v?/
-        account_value.csv        -> ppo mean/min/max + dji mean, normalized columns
+        account_value.csv        -> strategy mean/min/max + dji mean, normalized columns
         backtest_result.csv      -> same content, convenient for plotting
         backtest_result_annual_reset_*.csv/png
         image_source_manifest.csv -> source CSVs used by the Annual Reset plot
@@ -628,20 +917,28 @@ def plot_window_annual_reset_aggregate(window_dir: Path, reward_type: str) -> No
     trade_start_date = None
     trade_end_date = None
     date_suffix = datetime.now().strftime("%m%d")
+    preferred_agent = primary_agent_name()
+    selected_agent = preferred_agent
 
     for repeat_dir in repeat_dirs:
         csv_path = select_backtest_result_csv(repeat_dir, reward_type)
         if csv_path is None:
             continue
         df = _read_backtest_csv(csv_path)
-        if df is None or "ppo" not in df.columns:
+        if df is None:
             continue
+
+        agent_col = find_strategy_column(df, preferred_agent=preferred_agent)
+        if agent_col is None:
+            continue
+        selected_agent = agent_col
         source_rows.append(
             {
                 "plot": "backtest_result_annual_reset.png",
                 "source_role": "single_backtest_repeat",
                 "source_repeat_dir": str(repeat_dir),
                 "source_csv": str(csv_path),
+                "source_agent": agent_col,
                 "rows": len(df),
                 "columns": ",".join(df.columns),
             }
@@ -662,35 +959,38 @@ def plot_window_annual_reset_aggregate(window_dir: Path, reward_type: str) -> No
                     except Exception:
                         pass
 
-        keep_cols = [c for c in ["date", "ppo", "dji"] if c in df.columns]
-        run_dfs.append(df[keep_cols].copy())
+        keep_cols = ["date", agent_col] + (["dji"] if "dji" in df.columns else [])
+        one_run = df[keep_cols].copy().rename(columns={agent_col: "strategy"})
+        run_dfs.append(one_run)
 
     if not run_dfs:
         print(f"{window_dir} 沒有可用的 backtest_result csv，略過 aggregate plot。")
         return
 
     base_dates = run_dfs[0]["date"].astype(str)
-    ppo_runs = []
+    strategy_runs = []
     dji_runs = []
 
     for run_idx, df in enumerate(run_dfs, start=1):
         aligned = df.set_index("date").reindex(base_dates).reset_index()
-        if "ppo" in aligned.columns:
-            ppo_runs.append(pd.to_numeric(aligned["ppo"], errors="coerce").rename(f"ppo_run_{run_idx:02d}"))
+        if "strategy" in aligned.columns:
+            strategy_runs.append(pd.to_numeric(aligned["strategy"], errors="coerce").rename(f"{selected_agent}_run_{run_idx:02d}"))
         if "dji" in aligned.columns:
             dji_runs.append(pd.to_numeric(aligned["dji"], errors="coerce").rename(f"dji_run_{run_idx:02d}"))
 
-    ppo_df = pd.concat(ppo_runs, axis=1) if ppo_runs else pd.DataFrame(index=range(len(base_dates)))
+    strategy_df = pd.concat(strategy_runs, axis=1) if strategy_runs else pd.DataFrame(index=range(len(base_dates)))
     dji_df = pd.concat(dji_runs, axis=1) if dji_runs else pd.DataFrame(index=range(len(base_dates)))
 
     aggregate_df = pd.DataFrame({"date": base_dates})
-    if not ppo_df.empty:
-        aggregate_df["ppo_mean"] = ppo_df.mean(axis=1)
-        aggregate_df["ppo_min"] = ppo_df.min(axis=1)
-        aggregate_df["ppo_max"] = ppo_df.max(axis=1)
-        aggregate_df["ppo_mean_norm"] = _normalize_series(aggregate_df["ppo_mean"])
-        aggregate_df["ppo_min_norm"] = _normalize_series(aggregate_df["ppo_min"])
-        aggregate_df["ppo_max_norm"] = _normalize_series(aggregate_df["ppo_max"])
+    if not strategy_df.empty:
+        aggregate_df["strategy_mean"] = strategy_df.mean(axis=1)
+        aggregate_df["strategy_min"] = strategy_df.min(axis=1)
+        aggregate_df["strategy_max"] = strategy_df.max(axis=1)
+        aggregate_df["strategy_mean_norm"] = _normalize_series(aggregate_df["strategy_mean"])
+        aggregate_df["strategy_min_norm"] = _normalize_series(aggregate_df["strategy_min"])
+        aggregate_df["strategy_max_norm"] = _normalize_series(aggregate_df["strategy_max"])
+        for suffix in ["mean", "min", "max", "mean_norm", "min_norm", "max_norm"]:
+            aggregate_df[f"{selected_agent}_{suffix}"] = aggregate_df[f"strategy_{suffix}"]
     if not dji_df.empty:
         aggregate_df["dji_mean"] = dji_df.mean(axis=1)
         aggregate_df["dji_mean_norm"] = _normalize_series(aggregate_df["dji_mean"])
@@ -721,18 +1021,21 @@ def plot_window_annual_reset_aggregate(window_dir: Path, reward_type: str) -> No
     fig, ax = plt.subplots(figsize=(15, 5))
     x = np.arange(len(aggregate_df))
     reward_name = reward_display_name(reward_type)
+    selected_agent_label = agent_display_name(selected_agent)
 
-    if {"ppo_mean_norm", "ppo_min_norm", "ppo_max_norm"}.issubset(aggregate_df.columns):
-        ppo_mean = pd.to_numeric(aggregate_df["ppo_mean_norm"], errors="coerce")
-        ppo_min = pd.to_numeric(aggregate_df["ppo_min_norm"], errors="coerce")
-        ppo_max = pd.to_numeric(aggregate_df["ppo_max_norm"], errors="coerce")
-        ret = (ppo_mean.dropna().iloc[-1] - 1) * 100 if ppo_mean.notna().any() else 0
-        ax.fill_between(x, ppo_min, ppo_max, color="blue", alpha=0.16)
-        ax.plot(x, ppo_mean, color="blue", linewidth=2.2, label=f"{reward_name} PPO mean ({ret:.2f}%)")
+    if {"strategy_mean_norm", "strategy_min_norm", "strategy_max_norm"}.issubset(aggregate_df.columns):
+        strategy_mean = pd.to_numeric(aggregate_df["strategy_mean_norm"], errors="coerce")
+        strategy_min = pd.to_numeric(aggregate_df["strategy_min_norm"], errors="coerce")
+        strategy_max = pd.to_numeric(aggregate_df["strategy_max_norm"], errors="coerce")
+        valid = strategy_mean.dropna()
+        ret = (valid.iloc[-1] - 1) * 100 if not valid.empty else 0
+        ax.fill_between(x, strategy_min, strategy_max, color="blue", alpha=0.16)
+        ax.plot(x, strategy_mean, color="blue", linewidth=2.2, label=f"{reward_name} {selected_agent_label} mean ({ret:.2f}%)")
 
     if "dji_mean_norm" in aggregate_df.columns:
         dji_mean = pd.to_numeric(aggregate_df["dji_mean_norm"], errors="coerce")
-        ret = (dji_mean.dropna().iloc[-1] - 1) * 100 if dji_mean.notna().any() else 0
+        valid = dji_mean.dropna()
+        ret = (valid.iloc[-1] - 1) * 100 if not valid.empty else 0
         ax.plot(x, dji_mean, color="tab:green", label=f"DJI ({ret:.2f}%)")
 
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1)
@@ -758,6 +1061,276 @@ def plot_window_annual_reset_aggregate(window_dir: Path, reward_type: str) -> No
 
     print(f"Window Annual Reset folder saved to: {mean_dir}")
     print(f"Annual Reset source repeats: {len(source_rows)}")
+
+
+def plot_window_training_reward_aggregate(window_dir: Path, reward_type: str) -> None:
+    """Average the primary Agent training reward curves in one rolling window.
+
+    PPO keeps the original rollout/ep_rew_mean values and only changes the
+    x-axis to a sequential epoch number. REINFORCE uses its per-episode average
+    reward. The output line is the mean across repeats, and the light band is
+    the min-max range. No moving average is applied along the epoch axis.
+    """
+    agent_name = primary_agent_name()
+
+    repeat_dirs = sorted(path for path in window_dir.iterdir() if is_backtest_repeat_dir(path))
+    reward_series: list[pd.Series] = []
+    source_rows: list[dict[str, Any]] = []
+
+    for repeat_dir in repeat_dirs:
+        csv_path = select_training_reward_curve_csv(repeat_dir, agent_name)
+        if csv_path is None:
+            continue
+
+        try:
+            curve = pd.read_csv(csv_path)
+        except Exception as exc:
+            print(f"讀取 training reward curve 失敗: {csv_path} -> {exc}")
+            continue
+
+        epoch_col = next((col for col in ["epoch", "episodes"] if col in curve.columns), None)
+        reward_col = next(
+            (
+                col
+                for col in [
+                    "average_reward",
+                    "rollout/episode_average_reward",
+                    "episode_reward_mean",
+                    "rollout/ep_rew_mean",
+                ]
+                if col in curve.columns
+            ),
+            None,
+        )
+        if reward_col is None:
+            print(f"Training reward curve 缺少 reward 欄位: {csv_path}")
+            continue
+
+        epochs = (
+            pd.to_numeric(curve[epoch_col], errors="coerce")
+            if epoch_col is not None
+            else pd.Series(np.arange(1, len(curve) + 1), index=curve.index, dtype=float)
+        )
+        rewards = pd.to_numeric(curve[reward_col], errors="coerce")
+        normalized = pd.DataFrame({"epoch": epochs, "reward": rewards}).dropna()
+        if normalized.empty:
+            continue
+
+        normalized["epoch"] = normalized["epoch"].astype(int)
+        normalized = normalized.drop_duplicates(subset=["epoch"], keep="last").sort_values("epoch")
+        series = normalized.set_index("epoch")["reward"].rename(repeat_dir.name)
+        reward_series.append(series)
+        source_rows.append(
+            {
+                "repeat_dir": repeat_dir.name,
+                "source_csv": str(csv_path),
+                "epoch_column": epoch_col or "row_number",
+                "reward_column": reward_col,
+            }
+        )
+
+    if len(reward_series) != REPEAT_EXPERIMENTS:
+        print(
+            "Training reward aggregate skipped: "
+            f"expected {REPEAT_EXPERIMENTS} curves, found {len(reward_series)} in {window_dir}."
+        )
+        return
+
+    aligned = pd.concat(reward_series, axis=1).sort_index()
+    aligned = aligned.dropna(how="any")
+    if aligned.empty:
+        print(f"Training reward curves have no common epochs: {window_dir}")
+        return
+
+    aggregate_df = pd.DataFrame(
+        {
+            "epoch": aligned.index.astype(int),
+            "average_reward": aligned.mean(axis=1).to_numpy(),
+            "min_reward": aligned.min(axis=1).to_numpy(),
+            "max_reward": aligned.max(axis=1).to_numpy(),
+            "repeat_count": len(reward_series),
+        }
+    )
+
+    output_dir = window_dir / f"reward_curve_average_{reward_type}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    date_suffix = datetime.now().strftime("%Y%m%d")
+    csv_path = output_dir / (
+        f"training_reward_curve_{REPEAT_EXPERIMENTS}_repeat_average_{agent_name}_{reward_type}_{date_suffix}.csv"
+    )
+    canonical_csv_path = output_dir / "reward_curve.csv"
+    aggregate_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    aggregate_df.to_csv(canonical_csv_path, index=False, encoding="utf-8-sig")
+
+    fig, ax = plt.subplots(figsize=(15, 5))
+    ax.fill_between(
+        aggregate_df["epoch"],
+        aggregate_df["min_reward"],
+        aggregate_df["max_reward"],
+        color="blue",
+        alpha=0.16,
+    )
+    ax.plot(
+        aggregate_df["epoch"],
+        aggregate_df["average_reward"],
+        color="blue",
+        linewidth=2.0,
+    )
+    ax.set_title(
+        f"Training Reward Curve - {agent_display_name(agent_name)} "
+        f"({reward_display_name(reward_type)}, {REPEAT_EXPERIMENTS}-Repeat Average)"
+    )
+    set_axis_labels_horizontal(ax, "epoch", "average reward", ylabel_pad=75)
+    ax.grid(True, alpha=0.25)
+    fig.tight_layout()
+
+    png_path = output_dir / (
+        f"training_reward_curve_{REPEAT_EXPERIMENTS}_repeat_average_{agent_name}_{reward_type}_{date_suffix}.png"
+    )
+    canonical_png_path = output_dir / f"training_reward_curve_{REPEAT_EXPERIMENTS}_repeat_average.png"
+    fig.savefig(png_path, dpi=150, bbox_inches="tight")
+    fig.savefig(canonical_png_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    source_manifest = pd.DataFrame(source_rows)
+    source_manifest["output_csv"] = str(csv_path)
+    source_manifest["output_png"] = str(png_path)
+    source_manifest["range_definition"] = f"min-max across {REPEAT_EXPERIMENTS} repeats"
+    source_manifest.to_csv(output_dir / "image_source_manifest.csv", index=False, encoding="utf-8-sig")
+
+    print(f"Window training reward {REPEAT_EXPERIMENTS}-repeat average saved to: {output_dir}")
+
+
+def plot_window_deterministic_eval_aggregate(window_dir: Path, reward_type: str) -> None:
+    """Average periodic deterministic REINFORCE evaluation curves across repeats."""
+    if primary_agent_name() != "reinforce":
+        print("Deterministic evaluation aggregate skipped: primary agent is not REINFORCE.")
+        return
+
+    repeat_dirs = sorted(path for path in window_dir.iterdir() if is_backtest_repeat_dir(path))
+    reward_series: list[pd.Series] = []
+    asset_series: list[pd.Series] = []
+    source_rows: list[dict[str, Any]] = []
+
+    for repeat_dir in repeat_dirs:
+        csv_path = select_deterministic_eval_curve_csv(repeat_dir)
+        if csv_path is None:
+            continue
+
+        try:
+            curve = pd.read_csv(csv_path)
+        except Exception as exc:
+            print(f"讀取 deterministic evaluation curve 失敗: {csv_path} -> {exc}")
+            continue
+
+        required = {"epoch", "deterministic_reward"}
+        if not required.issubset(curve.columns):
+            print(f"Deterministic evaluation curve 缺少欄位: {csv_path}")
+            continue
+
+        normalized = pd.DataFrame(
+            {
+                "epoch": pd.to_numeric(curve["epoch"], errors="coerce"),
+                "reward": pd.to_numeric(curve["deterministic_reward"], errors="coerce"),
+                "final_asset": pd.to_numeric(
+                    curve.get("deterministic_final_asset", pd.Series(np.nan, index=curve.index)),
+                    errors="coerce",
+                ),
+            }
+        ).dropna(subset=["epoch", "reward"])
+        if normalized.empty:
+            continue
+
+        normalized["epoch"] = normalized["epoch"].astype(int)
+        normalized = normalized.drop_duplicates(subset=["epoch"], keep="last").sort_values("epoch")
+        indexed = normalized.set_index("epoch")
+        reward_series.append(indexed["reward"].rename(repeat_dir.name))
+        asset_series.append(indexed["final_asset"].rename(repeat_dir.name))
+        source_rows.append(
+            {
+                "repeat_dir": repeat_dir.name,
+                "source_csv": str(csv_path),
+                "reward_column": "deterministic_reward",
+                "final_asset_column": "deterministic_final_asset",
+            }
+        )
+
+    if len(reward_series) != REPEAT_EXPERIMENTS:
+        print(
+            "Deterministic evaluation aggregate skipped: "
+            f"expected {REPEAT_EXPERIMENTS} curves, found {len(reward_series)} in {window_dir}."
+        )
+        return
+
+    aligned_reward = pd.concat(reward_series, axis=1).sort_index().dropna(how="any")
+    if aligned_reward.empty:
+        print(f"Deterministic evaluation curves have no common epochs: {window_dir}")
+        return
+
+    aligned_asset = pd.concat(asset_series, axis=1).reindex(aligned_reward.index)
+    aggregate_df = pd.DataFrame(
+        {
+            "epoch": aligned_reward.index.astype(int),
+            "average_deterministic_reward": aligned_reward.mean(axis=1).to_numpy(),
+            "min_deterministic_reward": aligned_reward.min(axis=1).to_numpy(),
+            "max_deterministic_reward": aligned_reward.max(axis=1).to_numpy(),
+            "average_deterministic_final_asset": aligned_asset.mean(axis=1).to_numpy(),
+            "repeat_count": len(reward_series),
+        }
+    )
+
+    output_dir = window_dir / f"deterministic_eval_curve_average_{reward_type}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    date_suffix = datetime.now().strftime("%Y%m%d")
+    csv_path = output_dir / (
+        f"deterministic_eval_curve_{REPEAT_EXPERIMENTS}_repeat_average_"
+        f"reinforce_{reward_type}_{date_suffix}.csv"
+    )
+    canonical_csv_path = output_dir / "deterministic_eval_curve.csv"
+    aggregate_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    aggregate_df.to_csv(canonical_csv_path, index=False, encoding="utf-8-sig")
+
+    fig, ax = plt.subplots(figsize=(15, 5))
+    ax.fill_between(
+        aggregate_df["epoch"],
+        aggregate_df["min_deterministic_reward"],
+        aggregate_df["max_deterministic_reward"],
+        color="blue",
+        alpha=0.16,
+    )
+    ax.plot(
+        aggregate_df["epoch"],
+        aggregate_df["average_deterministic_reward"],
+        color="blue",
+        linewidth=2.0,
+    )
+    ax.set_title(
+        "Deterministic Evaluation Reward Curve - REINFORCE "
+        f"({reward_display_name(reward_type)}, {REPEAT_EXPERIMENTS}-Repeat Average)"
+    )
+    set_axis_labels_horizontal(ax, "epoch", "deterministic reward", ylabel_pad=75)
+    ax.grid(True, alpha=0.25)
+    fig.tight_layout()
+
+    png_path = output_dir / (
+        f"deterministic_eval_curve_{REPEAT_EXPERIMENTS}_repeat_average_"
+        f"reinforce_{reward_type}_{date_suffix}.png"
+    )
+    canonical_png_path = output_dir / "deterministic_eval_curve.png"
+    fig.savefig(png_path, dpi=150, bbox_inches="tight")
+    fig.savefig(canonical_png_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    source_manifest = pd.DataFrame(source_rows)
+    source_manifest["output_csv"] = str(csv_path)
+    source_manifest["output_png"] = str(png_path)
+    source_manifest["range_definition"] = f"min-max across {REPEAT_EXPERIMENTS} repeats"
+    source_manifest.to_csv(output_dir / "image_source_manifest.csv", index=False, encoding="utf-8-sig")
+
+    print(
+        f"Window deterministic evaluation {REPEAT_EXPERIMENTS}-repeat average saved to: "
+        f"{output_dir}"
+    )
 
 
 def _find_latest_rolling_root(reward_type: str) -> Path | None:
@@ -786,6 +1359,7 @@ def _collect_annual_reset_series(rolling_root: Path, reward_type: str) -> pd.Dat
     out = pd.concat(frames, ignore_index=True)
     out = keep_valid_date_rows(out)
     out = out.drop_duplicates(subset=["date"], keep="last")
+    out = ensure_strategy_columns(out)
     out.attrs["source_csvs"] = source_csvs
     return out
 
@@ -848,9 +1422,10 @@ def compare_latest_v0_target(target_reward_type: str) -> None:
     compare_dir = Path(EXPERIMENT_ROOT) / f"compare_v0_{target_reward_type}"
     compare_dir.mkdir(parents=True, exist_ok=True)
 
-    target_cols = [c for c in ["date", "ppo_mean_norm", "ppo_min_norm", "ppo_max_norm", "dji_mean_norm"] if c in df_target.columns]
+    strategy_cols = ["date", "strategy_mean_norm", "strategy_min_norm", "strategy_max_norm", "dji_mean_norm"]
+    target_cols = [c for c in strategy_cols if c in df_target.columns]
     merged = pd.merge(
-        df_v0[[c for c in ["date", "ppo_mean_norm", "ppo_min_norm", "ppo_max_norm", "dji_mean_norm"] if c in df_v0.columns]],
+        df_v0[[c for c in strategy_cols if c in df_v0.columns]],
         df_target[target_cols],
         on="date",
         how="outer",
@@ -865,14 +1440,14 @@ def compare_latest_v0_target(target_reward_type: str) -> None:
     target_name = reward_display_name(target_reward_type)
 
     def add_strategy(prefix: str, color: str, label: str) -> None:
-        mean_col = f"ppo_mean_norm_{prefix}"
-        min_col = f"ppo_min_norm_{prefix}"
-        max_col = f"ppo_max_norm_{prefix}"
+        mean_col = f"strategy_mean_norm_{prefix}"
+        min_col = f"strategy_min_norm_{prefix}"
+        max_col = f"strategy_max_norm_{prefix}"
         # If pandas did not suffix because the column did not overlap, support the plain column too.
-        if mean_col not in merged.columns and prefix == target_reward_type and "ppo_mean_norm" in merged.columns:
-            mean_col = "ppo_mean_norm"
-            min_col = "ppo_min_norm"
-            max_col = "ppo_max_norm"
+        if mean_col not in merged.columns and prefix == target_reward_type and "strategy_mean_norm" in merged.columns:
+            mean_col = "strategy_mean_norm"
+            min_col = "strategy_min_norm"
+            max_col = "strategy_max_norm"
         if mean_col not in merged.columns:
             return
         mean = pd.to_numeric(merged[mean_col], errors="coerce")
@@ -959,7 +1534,7 @@ def _make_previous_state_for_continuous(
     )
 
 
-def _run_continuous_window_ppo(
+def _run_continuous_window_agent(
     trade_data_path: Path,
     trained_model_dir: Path,
     carried_cash: float,
@@ -972,6 +1547,7 @@ def _run_continuous_window_ppo(
 ) -> tuple[pd.DataFrame, pd.DataFrame, float, dict[str, float], list[str]]:
     """Run one test window using carried cash/holdings as the initial portfolio."""
     from stable_baselines3 import PPO
+    from finrl.agents.policy_gradient import ReinforceAgent
     from finrl.config import INDICATORS
     from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
 
@@ -983,9 +1559,17 @@ def _run_continuous_window_ppo(
     tic_order = _get_first_day_tic_order(trade)
     aligned_shares = _align_shares_to_tic_order(carried_shares_by_tic, tic_order)
 
-    model_path = trained_model_dir / "agent_ppo"
-    if not model_path.with_suffix(".zip").exists() and not model_path.exists():
-        raise FileNotFoundError(f"找不到 PPO model: {model_path}.zip")
+    agent_name = primary_agent_name()
+    if agent_name == "ppo":
+        model_path = trained_model_dir / "agent_ppo"
+        if not model_path.with_suffix(".zip").exists() and not model_path.exists():
+            raise FileNotFoundError(f"找不到 PPO model: {model_path}.zip")
+    elif agent_name == "reinforce":
+        model_path = trained_model_dir / "agent_reinforce"
+        if not model_path.with_suffix(".pt").exists() and not model_path.exists():
+            raise FileNotFoundError(f"找不到 REINFORCE model: {model_path}.pt")
+    else:
+        raise ValueError(f"continuous 5y test 尚未支援 agent: {agent_name}")
 
     buy_cost_list = sell_cost_list = [0.001] * stock_dimension
     previous_state = _make_previous_state_for_continuous(carried_cash, aligned_shares, stock_dimension)
@@ -1014,7 +1598,10 @@ def _run_continuous_window_ppo(
         **env_kwargs,
     )
 
-    model = PPO.load(model_path)
+    if agent_name == "ppo":
+        model = PPO.load(model_path)
+    else:
+        model = ReinforceAgent.load(model_path)
     test_env, test_obs = env.get_sb_env()
     test_env.reset()
     max_steps = len(env.df.index.unique()) - 1
@@ -1062,6 +1649,7 @@ def run_continuous_5y_test(
     windows: list[dict[str, Any]],
     reward_type: str,
     initial_cash: float = 1_000_000.0,
+    timer: ExperimentTimer | None = None,
 ) -> None:
     """Run repeated continuous tests across all rolling test windows.
 
@@ -1070,17 +1658,22 @@ def run_continuous_5y_test(
     Within one repeat, the final cash and stock holdings from window t become
     the initial portfolio of window t+1.
     """
+    continuous_started_at = datetime.now()
+    continuous_start_counter = time.perf_counter()
     reward_type = normalize_reward_type_for_continuous(reward_type)
     out_dir = rolling_root / CONTINUOUS_TEST_DIR_NAME
     out_dir.mkdir(parents=True, exist_ok=True)
 
     repeat_results: list[pd.DataFrame] = []
     repeat_summary_rows: list[dict[str, Any]] = []
+    continuous_agent = primary_agent_name()
     window_summary_rows: list[dict[str, Any]] = []
     source_rows: list[dict[str, Any]] = []
     date_suffix = datetime.now().strftime("%m%d")
 
     for repeat_index in range(1, REPEAT_EXPERIMENTS + 1):
+        repeat_started_at = datetime.now()
+        repeat_start_counter = time.perf_counter()
         test_seed = BASE_RANDOM_SEED + repeat_index
         repeat_dir = out_dir / repeat_folder_name(repeat_index, test_seed)
         repeat_dir.mkdir(parents=True, exist_ok=True)
@@ -1098,6 +1691,8 @@ def run_continuous_5y_test(
         print("-" * 80)
 
         for idx, window in enumerate(windows):
+            window_started_at = datetime.now()
+            window_start_counter = time.perf_counter()
             window_dir = rolling_root / window_folder_name(window)
             experiment_dir = window_dir / repeat_folder_name(repeat_index, test_seed)
             trade_data_path = experiment_dir / "data" / "trade_data.csv"
@@ -1112,17 +1707,42 @@ def run_continuous_5y_test(
             start_shares = dict(carried_shares_by_tic)
             window_seed = test_seed + int(window["window_id"]) * 1000
 
-            account_value, holdings, carried_cash, carried_shares_by_tic, tic_order = _run_continuous_window_ppo(
-                trade_data_path=trade_data_path,
-                trained_model_dir=trained_model_dir,
-                carried_cash=carried_cash,
-                carried_shares_by_tic=carried_shares_by_tic,
-                reward_type=reward_type,
-                reward_params=REWARD_PARAMS_BY_TYPE.get(reward_type, REWARD_PARAMS),
-                use_carried_state=idx > 0,
-                random_seed=window_seed,
-                predict_deterministic=TEST_PREDICT_DETERMINISTIC,
-            )
+            try:
+                account_value, holdings, carried_cash, carried_shares_by_tic, tic_order = _run_continuous_window_agent(
+                    trade_data_path=trade_data_path,
+                    trained_model_dir=trained_model_dir,
+                    carried_cash=carried_cash,
+                    carried_shares_by_tic=carried_shares_by_tic,
+                    reward_type=reward_type,
+                    reward_params=REWARD_PARAMS_BY_TYPE.get(reward_type, REWARD_PARAMS),
+                    use_carried_state=idx > 0,
+                    random_seed=window_seed,
+                    predict_deterministic=TEST_PREDICT_DETERMINISTIC,
+                )
+            except Exception:
+                if timer is not None:
+                    timer.add(
+                        "continuous_window",
+                        time.perf_counter() - window_start_counter,
+                        window_id=window["window_id"],
+                        repeat_index=repeat_index,
+                        name=window_dir.name,
+                        started_at=window_started_at,
+                        completed_at=datetime.now(),
+                        status="failed",
+                    )
+                raise
+
+            if timer is not None:
+                timer.add(
+                    "continuous_window",
+                    time.perf_counter() - window_start_counter,
+                    window_id=window["window_id"],
+                    repeat_index=repeat_index,
+                    name=window_dir.name,
+                    started_at=window_started_at,
+                    completed_at=datetime.now(),
+                )
 
             account_value = account_value.copy()
             account_value["date"] = account_value["date"].astype(str)
@@ -1138,7 +1758,7 @@ def run_continuous_5y_test(
             window_holdings_path = repeat_dir / f"holdings_window_{window['window_id']:02d}_{reward_type}.csv"
             holdings.to_csv(window_holdings_path, index=False, encoding="utf-8-sig")
 
-            ppo = pd.to_numeric(account_value["account_value"], errors="coerce").dropna()
+            strategy = pd.to_numeric(account_value["account_value"], errors="coerce").dropna()
             window_summary_rows.append(
                 {
                     "repeat_index": repeat_index,
@@ -1152,9 +1772,9 @@ def run_continuous_5y_test(
                     "end_cash": carried_cash,
                     "start_position_count": sum(1 for v in start_shares.values() if abs(v) > 1e-9),
                     "end_position_count": sum(1 for v in carried_shares_by_tic.values() if abs(v) > 1e-9),
-                    "start_account_value": float(ppo.iloc[0]) if not ppo.empty else np.nan,
-                    "end_account_value": float(ppo.iloc[-1]) if not ppo.empty else np.nan,
-                    "window_return": float(ppo.iloc[-1] / ppo.iloc[0] - 1) if len(ppo) >= 2 and ppo.iloc[0] != 0 else np.nan,
+                    "start_account_value": float(strategy.iloc[0]) if not strategy.empty else np.nan,
+                    "end_account_value": float(strategy.iloc[-1]) if not strategy.empty else np.nan,
+                    "window_return": float(strategy.iloc[-1] / strategy.iloc[0] - 1) if len(strategy) >= 2 and strategy.iloc[0] != 0 else np.nan,
                     "trade_data": str(trade_data_path),
                     "trained_model_dir": str(trained_model_dir),
                     "holdings_csv": str(window_holdings_path),
@@ -1183,9 +1803,11 @@ def run_continuous_5y_test(
 
         repeat_result = pd.concat(account_frames, ignore_index=True)
         repeat_result = repeat_result.drop_duplicates(subset=["date"], keep="last").sort_values("date").reset_index(drop=True)
-        repeat_result = repeat_result.rename(columns={"account_value": "ppo_continuous"})
-        repeat_result["ppo_continuous_norm"] = _normalize_series(repeat_result["ppo_continuous"])
-        repeat_results.append(repeat_result[["date", "ppo_continuous", "ppo_continuous_norm"]].copy())
+        repeat_result = repeat_result.rename(columns={"account_value": "strategy_continuous"})
+        repeat_result["strategy_continuous_norm"] = _normalize_series(repeat_result["strategy_continuous"])
+        repeat_result[f"{continuous_agent}_continuous"] = repeat_result["strategy_continuous"]
+        repeat_result[f"{continuous_agent}_continuous_norm"] = repeat_result["strategy_continuous_norm"]
+        repeat_results.append(repeat_result[["date", "strategy_continuous", "strategy_continuous_norm"]].copy())
 
         start_date = str(repeat_result["date"].iloc[0])
         end_date = str(repeat_result["date"].iloc[-1])
@@ -1194,7 +1816,7 @@ def run_continuous_5y_test(
         repeat_result.to_csv(repeat_csv, index=False, encoding="utf-8-sig")
         repeat_result.to_csv(repeat_dated_csv, index=False, encoding="utf-8-sig")
 
-        valid = pd.to_numeric(repeat_result["ppo_continuous_norm"], errors="coerce").dropna()
+        valid = pd.to_numeric(repeat_result["strategy_continuous_norm"], errors="coerce").dropna()
         repeat_summary_rows.append(
             {
                 "repeat_index": repeat_index,
@@ -1208,36 +1830,56 @@ def run_continuous_5y_test(
                 "predict_deterministic": TEST_PREDICT_DETERMINISTIC,
             }
         )
+        if timer is not None:
+            timer.add(
+                "continuous_repeat",
+                time.perf_counter() - repeat_start_counter,
+                repeat_index=repeat_index,
+                name=repeat_dir.name,
+                started_at=repeat_started_at,
+                completed_at=datetime.now(),
+            )
 
     if not repeat_results:
         print(f"{rolling_root} 沒有可用 window，略過 continuous 5y test。")
+        if timer is not None:
+            timer.add(
+                "continuous_5y",
+                time.perf_counter() - continuous_start_counter,
+                name=continuous_agent,
+                started_at=continuous_started_at,
+                completed_at=datetime.now(),
+                status="skipped_no_result",
+            )
         return
 
     base_dates = repeat_results[0]["date"].astype(str)
-    ppo_runs = []
-    ppo_norm_runs = []
+    strategy_runs = []
+    strategy_norm_runs = []
     for run_idx, df in enumerate(repeat_results, start=1):
         aligned = df.set_index("date").reindex(base_dates).reset_index()
-        ppo_runs.append(pd.to_numeric(aligned["ppo_continuous"], errors="coerce").rename(f"ppo_run_{run_idx:02d}"))
-        ppo_norm_runs.append(pd.to_numeric(aligned["ppo_continuous_norm"], errors="coerce").rename(f"ppo_norm_run_{run_idx:02d}"))
+        strategy_runs.append(pd.to_numeric(aligned["strategy_continuous"], errors="coerce").rename(f"{continuous_agent}_run_{run_idx:02d}"))
+        strategy_norm_runs.append(pd.to_numeric(aligned["strategy_continuous_norm"], errors="coerce").rename(f"{continuous_agent}_norm_run_{run_idx:02d}"))
 
-    ppo_df = pd.concat(ppo_runs, axis=1)
-    ppo_norm_df = pd.concat(ppo_norm_runs, axis=1)
+    strategy_df = pd.concat(strategy_runs, axis=1)
+    strategy_norm_df = pd.concat(strategy_norm_runs, axis=1)
 
     result = pd.DataFrame({"date": base_dates})
-    for col in ppo_df.columns:
-        result[col] = ppo_df[col].to_numpy()
-    for col in ppo_norm_df.columns:
-        result[col] = ppo_norm_df[col].to_numpy()
+    for col in strategy_df.columns:
+        result[col] = strategy_df[col].to_numpy()
+    for col in strategy_norm_df.columns:
+        result[col] = strategy_norm_df[col].to_numpy()
 
-    result["ppo_continuous"] = ppo_df.mean(axis=1)
-    result["ppo_continuous_mean"] = result["ppo_continuous"]
-    result["ppo_continuous_min"] = ppo_df.min(axis=1)
-    result["ppo_continuous_max"] = ppo_df.max(axis=1)
-    result["ppo_continuous_norm"] = _normalize_series(result["ppo_continuous"])
-    result["ppo_continuous_mean_norm"] = result["ppo_continuous_norm"]
-    result["ppo_continuous_min_norm"] = ppo_norm_df.min(axis=1)
-    result["ppo_continuous_max_norm"] = ppo_norm_df.max(axis=1)
+    result["strategy_continuous"] = strategy_df.mean(axis=1)
+    result["strategy_continuous_mean"] = result["strategy_continuous"]
+    result["strategy_continuous_min"] = strategy_df.min(axis=1)
+    result["strategy_continuous_max"] = strategy_df.max(axis=1)
+    result["strategy_continuous_norm"] = _normalize_series(result["strategy_continuous"])
+    result["strategy_continuous_mean_norm"] = result["strategy_continuous_norm"]
+    result["strategy_continuous_min_norm"] = strategy_norm_df.min(axis=1)
+    result["strategy_continuous_max_norm"] = strategy_norm_df.max(axis=1)
+    for suffix in ["continuous", "continuous_mean", "continuous_min", "continuous_max", "continuous_norm", "continuous_mean_norm", "continuous_min_norm", "continuous_max_norm"]:
+        result[f"{continuous_agent}_{suffix}"] = result[f"strategy_{suffix}"]
 
     dji_series = build_dji_baseline(result["date"].tolist(), initial_amount=initial_cash)
     if dji_series.notna().any():
@@ -1259,14 +1901,14 @@ def run_continuous_5y_test(
 
     fig, ax = plt.subplots(figsize=(16, 6))
     x = np.arange(len(result))
-    y = pd.to_numeric(result["ppo_continuous_norm"], errors="coerce")
-    y_min = pd.to_numeric(result["ppo_continuous_min_norm"], errors="coerce")
-    y_max = pd.to_numeric(result["ppo_continuous_max_norm"], errors="coerce")
+    y = pd.to_numeric(result["strategy_continuous_norm"], errors="coerce")
+    y_min = pd.to_numeric(result["strategy_continuous_min_norm"], errors="coerce")
+    y_max = pd.to_numeric(result["strategy_continuous_max_norm"], errors="coerce")
     valid = y.dropna()
     ret = (valid.iloc[-1] - 1) * 100 if not valid.empty else 0
     reward_name = reward_display_name(reward_type)
     ax.fill_between(x, y_min, y_max, color="blue", alpha=0.16)
-    ax.plot(x, y, color="blue", linewidth=2.3, label=f"{reward_name} PPO continuous mean ({ret:.2f}%)")
+    ax.plot(x, y, color="blue", linewidth=2.3, label=f"{reward_name} {agent_display_name(continuous_agent)} continuous mean ({ret:.2f}%)")
     if "dji_mean_norm" in result.columns:
         dji_y = pd.to_numeric(result["dji_mean_norm"], errors="coerce")
         dji_valid = dji_y.dropna()
@@ -1302,9 +1944,18 @@ def run_continuous_5y_test(
         "end_date": end_date,
         "carry_state": "cash_and_stock_holdings_from_previous_window",
         "annual_reset_source": "matching_repeat_models",
+        "agent_name": continuous_agent,
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     save_json(out_dir / "continuous_config.json", config_payload)
+    if timer is not None:
+        timer.add(
+            "continuous_5y",
+            time.perf_counter() - continuous_start_counter,
+            name=continuous_agent,
+            started_at=continuous_started_at,
+            completed_at=datetime.now(),
+        )
     print(f"Continuous 5-year repeat-mean test saved to: {out_dir}")
 
 def _collect_continuous_5y_series(rolling_root: Path, reward_type: str) -> pd.DataFrame | None:
@@ -1312,14 +1963,22 @@ def _collect_continuous_5y_series(rolling_root: Path, reward_type: str) -> pd.Da
     if not csv_path.exists():
         return None
     df = pd.read_csv(csv_path)
-    if df.empty or "date" not in df.columns or "ppo_continuous_norm" not in df.columns:
+    if df.empty or "date" not in df.columns:
         return None
-    keep_cols = ["date", "ppo_continuous_norm"]
+
+    source_col = "strategy_continuous_norm"
+    if source_col not in df.columns:
+        # backward compatibility for older PPO-only continuous outputs
+        source_col = "ppo_continuous_norm"
+    if source_col not in df.columns:
+        return None
+
+    keep_cols = ["date", source_col]
     if "dji_mean_norm" in df.columns:
         keep_cols.append("dji_mean_norm")
     out = df[keep_cols].copy()
     out = keep_valid_date_rows(out)
-    out = out.rename(columns={"ppo_continuous_norm": f"ppo_continuous_norm_{reward_type}"})
+    out = out.rename(columns={source_col: f"strategy_continuous_norm_{reward_type}"})
     out.attrs["source_csvs"] = [str(csv_path)]
     return out
 
@@ -1381,8 +2040,8 @@ def compare_latest_continuous_v0_target(target_reward_type: str) -> None:
     baseline_name = reward_display_name("v0")
     target_name = reward_display_name(target_reward_type)
     for col, color, label in [
-        ("ppo_continuous_norm_v0", "blue", baseline_name),
-        (f"ppo_continuous_norm_{target_reward_type}", "red", target_name),
+        ("strategy_continuous_norm_v0", "blue", baseline_name),
+        (f"strategy_continuous_norm_{target_reward_type}", "red", target_name),
     ]:
         if col not in merged.columns:
             continue
@@ -1411,8 +2070,8 @@ def compare_latest_continuous_v0_target(target_reward_type: str) -> None:
 
     summary_rows = []
     for label, col in [
-        ("v0", "ppo_continuous_norm_v0"),
-        (target_reward_type, f"ppo_continuous_norm_{target_reward_type}"),
+        ("v0", "strategy_continuous_norm_v0"),
+        (target_reward_type, f"strategy_continuous_norm_{target_reward_type}"),
         ("dji", "dji_mean_norm"),
     ]:
         if col in merged.columns:
@@ -1444,8 +2103,16 @@ def compare_latest_continuous_v0_target(target_reward_type: str) -> None:
 # =====================================================
 
 if __name__ == "__main__":
+    experiment_timer = ExperimentTimer()
+    atexit.register(experiment_timer.finish, "stopped_before_completion")
+    validate_agent_configuration()
+
     project_root = Path(__file__).resolve().parents[1]
     os.chdir(project_root)
+
+    print("=" * 80)
+    print(f"Run experiment 開始時間：{experiment_timer.started_at.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 80 + "\n")
 
     if ROLLING_WINDOW_MODE:
         windows = generate_rolling_windows(
@@ -1455,7 +2122,25 @@ if __name__ == "__main__":
             TEST_YEARS,
             SHIFT_YEARS,
         )
+        if SMALL_DIAGNOSTIC_EXPERIMENT:
+            windows = windows[: max(1, int(DIAGNOSTIC_WINDOW_COUNT))]
+            diagnostic_timesteps = {
+                "a2c": A2C_TOTAL_TIMESTEPS,
+                "ddpg": DDPG_TOTAL_TIMESTEPS,
+                "ppo": PPO_TOTAL_TIMESTEPS,
+                "reinforce": REINFORCE_TOTAL_TIMESTEPS,
+                "td3": TD3_TOTAL_TIMESTEPS,
+                "sac": SAC_TOTAL_TIMESTEPS,
+            }.get(primary_agent_name())
+            print(
+                "Small diagnostic experiment enabled: "
+                f"windows={len(windows)}, repeats={REPEAT_EXPERIMENTS}, "
+                f"agent={agent_display_name(primary_agent_name())}, "
+                f"timesteps={diagnostic_timesteps}, "
+                f"eval interval={REINFORCE_EVAL_INTERVAL} epochs"
+            )
         rolling_root = create_rolling_root()
+        experiment_timer.set_output_dir(rolling_root)
         save_json(
             rolling_root / "rolling_config.json",
             {**base_experiment_config(), "rolling_root": str(rolling_root), "windows": windows},
@@ -1469,17 +2154,21 @@ if __name__ == "__main__":
         print(f"Train/Test  = {TRAIN_YEARS}y / {TEST_YEARS}y, shift {SHIFT_YEARS}y")
         print(f"Train/backtest repeats = {REPEAT_EXPERIMENTS}")
         print(f"Root             = {rolling_root}")
-        print("流程：每個 window 的每個 repeat 都 train 一個 PPO model，並 backtest 一次")
+        print(f"流程：每個 window 的每個 repeat 都 train 一個 {agent_display_name(primary_agent_name())} model，並 backtest 一次")
         print("========================================\n")
 
         summary_rows: list[dict[str, Any]] = []
 
         # 正確順序：每個 window 的每個 repeat 都先 train 一個新 model，接著只 backtest 一次。
         for window in windows:
+            window_started_at = datetime.now()
+            window_start_counter = time.perf_counter()
             window_dir = rolling_root / window_folder_name(window)
             window_dir.mkdir(parents=True, exist_ok=True)
 
             for repeat_index in range(1, REPEAT_EXPERIMENTS + 1):
+                repeat_started_at = datetime.now()
+                repeat_start_counter = time.perf_counter()
                 random_seed = BASE_RANDOM_SEED + repeat_index
                 experiment_dir = window_dir / repeat_folder_name(repeat_index, random_seed)
                 experiment_dir.mkdir(parents=True, exist_ok=True)
@@ -1524,7 +2213,14 @@ if __name__ == "__main__":
                 )
 
                 for script in scripts_to_run():
-                    run_script(script, child_env, project_root)
+                    run_script(
+                        script,
+                        child_env,
+                        project_root,
+                        experiment_timer,
+                        window_id=window["window_id"],
+                        repeat_index=repeat_index,
+                    )
 
                 backtest_summary = collect_backtest_summary(experiment_dir)
                 summary_rows.append(
@@ -1540,10 +2236,48 @@ if __name__ == "__main__":
                 )
                 write_rolling_summaries(rolling_root, summary_rows)
 
+                repeat_elapsed = time.perf_counter() - repeat_start_counter
+                repeat_completed_at = datetime.now()
+                experiment_timer.add(
+                    "repeat",
+                    repeat_elapsed,
+                    window_id=window["window_id"],
+                    repeat_index=repeat_index,
+                    name=experiment_dir.name,
+                    started_at=repeat_started_at,
+                    completed_at=repeat_completed_at,
+                )
+                print(
+                    f"Window {window['window_id']:02d}, repeat {repeat_index:02d} 總耗時："
+                    f"{format_elapsed_time(repeat_elapsed)} ({repeat_elapsed:.2f} 秒)\n"
+                )
+
             plot_window_annual_reset_aggregate(window_dir, REWARD_TYPE)
+            plot_window_training_reward_aggregate(window_dir, REWARD_TYPE)
+            plot_window_deterministic_eval_aggregate(window_dir, REWARD_TYPE)
+
+            window_elapsed = time.perf_counter() - window_start_counter
+            window_completed_at = datetime.now()
+            experiment_timer.add(
+                "window",
+                window_elapsed,
+                window_id=window["window_id"],
+                name=window_dir.name,
+                started_at=window_started_at,
+                completed_at=window_completed_at,
+            )
+            print(
+                f"Window {window['window_id']:02d} 全部 repeats 與彙整總耗時："
+                f"{format_elapsed_time(window_elapsed)} ({window_elapsed:.2f} 秒)\n"
+            )
 
         if RUN_CONTINUOUS_5Y_TEST:
-            run_continuous_5y_test(rolling_root, windows, REWARD_TYPE)
+            run_continuous_5y_test(
+                rolling_root,
+                windows,
+                REWARD_TYPE,
+                timer=experiment_timer,
+            )
             if AUTO_COMPARE_CONTINUOUS_LATEST:
                 compare_latest_continuous_v0_target(REWARD_TYPE)
             else:
@@ -1569,6 +2303,7 @@ if __name__ == "__main__":
             / f"{timestamp}_{REWARD_TYPE}"
         )
         experiment_dir.mkdir(parents=True, exist_ok=True)
+        experiment_timer.set_output_dir(experiment_dir)
         random_seed = BASE_RANDOM_SEED + 1
         save_json(
             experiment_dir / "experiment_config.json",
@@ -1595,6 +2330,8 @@ if __name__ == "__main__":
             random_seed=random_seed,
         )
         for script in scripts_to_run():
-            run_script(script, child_env, project_root)
+            run_script(script, child_env, project_root, experiment_timer)
         print("🎉 單次實驗執行完畢！")
         print(f"結果資料夾：{experiment_dir}")
+
+    experiment_timer.finish("completed")

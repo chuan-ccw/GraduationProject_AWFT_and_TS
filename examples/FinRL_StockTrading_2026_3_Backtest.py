@@ -20,6 +20,7 @@ import pandas as pd
 from stable_baselines3 import A2C, DDPG, PPO, SAC, TD3
 from stable_baselines3.common.utils import set_random_seed
 
+from finrl.agents.policy_gradient import ReinforceAgent
 from finrl.agents.stablebaselines3.models import DRLAgent
 from finrl import config
 from finrl.config import INDICATORS
@@ -44,6 +45,7 @@ WINDOW_ID = env_str("WINDOW_ID", "")
 REPEAT_INDEX = env_str("REPEAT_INDEX", "")
 RANDOM_SEED = env_int("RANDOM_SEED", 0)
 PREDICT_DETERMINISTIC = env_bool("PREDICT_DETERMINISTIC", False)
+PRIMARY_AGENT_NAME = env_str("PRIMARY_AGENT_NAME", "ppo").strip().lower()
 
 # Backtest uses stochastic PPO actions by default so repeated tests of the same model
 # can measure policy-sampling variation. RANDOM_SEED keeps each repeat reproducible.
@@ -314,12 +316,14 @@ trade.index.names = [""]
 if_using_a2c = env_bool("IF_USING_A2C", False)
 if_using_ddpg = env_bool("IF_USING_DDPG", False)
 if_using_ppo = env_bool("IF_USING_PPO", True)
+if_using_reinforce = env_bool("IF_USING_REINFORCE", False)
 if_using_td3 = env_bool("IF_USING_TD3", False)
 if_using_sac = env_bool("IF_USING_SAC", False)
 
 trained_a2c = A2C.load(TRAINED_MODEL_DIR / "agent_a2c") if if_using_a2c else None
 trained_ddpg = DDPG.load(TRAINED_MODEL_DIR / "agent_ddpg") if if_using_ddpg else None
 trained_ppo = PPO.load(TRAINED_MODEL_DIR / "agent_ppo") if if_using_ppo else None
+trained_reinforce = ReinforceAgent.load(TRAINED_MODEL_DIR / "agent_reinforce") if if_using_reinforce else None
 trained_td3 = TD3.load(TRAINED_MODEL_DIR / "agent_td3") if if_using_td3 else None
 trained_sac = SAC.load(TRAINED_MODEL_DIR / "agent_sac") if if_using_sac else None
 
@@ -425,8 +429,8 @@ def save_agent_diagnostics(
             "predict_deterministic": PREDICT_DETERMINISTIC,
         }
     ]
-    if agent_name.lower() == "ppo" and holdings_heatmap_path.exists():
-        canonical_heatmap_path = OUTPUT_DIR / "holdings_heatmap_ppo.png"
+    if agent_name.lower() == PRIMARY_AGENT_NAME and holdings_heatmap_path.exists():
+        canonical_heatmap_path = OUTPUT_DIR / f"holdings_heatmap_{PRIMARY_AGENT_NAME}.png"
         canonical_heatmap_path.write_bytes(holdings_heatmap_path.read_bytes())
         source_rows.append(
             {
@@ -607,6 +611,7 @@ def plot_reward_curve(rewards: pd.DataFrame, out_path: Path, agent_name: str) ->
 df_account_value_a2c, df_actions_a2c, _, _ = predict_and_collect(trained_a2c, "a2c") if if_using_a2c else (None, None, None, None)
 df_account_value_ddpg, df_actions_ddpg, _, _ = predict_and_collect(trained_ddpg, "ddpg") if if_using_ddpg else (None, None, None, None)
 df_account_value_ppo, df_actions_ppo, df_holdings_ppo, df_rewards_ppo = predict_and_collect(trained_ppo, "ppo") if if_using_ppo else (None, None, None, None)
+df_account_value_reinforce, df_actions_reinforce, df_holdings_reinforce, df_rewards_reinforce = predict_and_collect(trained_reinforce, "reinforce") if if_using_reinforce else (None, None, None, None)
 df_account_value_td3, df_actions_td3, _, _ = predict_and_collect(trained_td3, "td3") if if_using_td3 else (None, None, None, None)
 df_account_value_sac, df_actions_sac, _, _ = predict_and_collect(trained_sac, "sac") if if_using_sac else (None, None, None, None)
 
@@ -630,6 +635,7 @@ agent_outputs = {
     "a2c": (if_using_a2c, df_account_value_a2c),
     "ddpg": (if_using_ddpg, df_account_value_ddpg),
     "ppo": (if_using_ppo, df_account_value_ppo),
+    "reinforce": (if_using_reinforce, df_account_value_reinforce),
     "td3": (if_using_td3, df_account_value_td3),
     "sac": (if_using_sac, df_account_value_sac),
 }
@@ -695,14 +701,16 @@ summary = {
     "predict_deterministic": PREDICT_DETERMINISTIC,
 }
 
-if if_using_ppo and "ppo" in result.columns and result["ppo"].notna().any():
-    ppo = result["ppo"].dropna()
-    summary["initial_ppo"] = float(ppo.iloc[0])
-    summary["final_ppo"] = float(ppo.iloc[-1])
-    summary["ppo_return"] = float(ppo.iloc[-1] / ppo.iloc[0] - 1)
-    running_max = ppo.cummax()
-    drawdown = ppo / running_max - 1
-    summary["ppo_max_drawdown"] = float(drawdown.min())
+for agent_name in [c for c in result.columns if c != "dji"]:
+    series = pd.to_numeric(result[agent_name], errors="coerce").dropna()
+    if series.empty:
+        continue
+    summary[f"initial_{agent_name}"] = float(series.iloc[0])
+    summary[f"final_{agent_name}"] = float(series.iloc[-1])
+    summary[f"{agent_name}_return"] = float(series.iloc[-1] / series.iloc[0] - 1)
+    running_max = series.cummax()
+    drawdown = series / running_max - 1
+    summary[f"{agent_name}_max_drawdown"] = float(drawdown.min())
 
 if "dji" in result.columns and result["dji"].notna().any():
     summary["final_dji"] = float(result["dji"].dropna().iloc[-1])

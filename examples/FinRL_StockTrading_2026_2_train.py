@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 from stable_baselines3.common.logger import configure
 
+from finrl.agents.policy_gradient import ReinforceAgent
 from finrl.agents.stablebaselines3.models import DRLAgent
 from finrl import config
 from finrl.config import INDICATORS
@@ -37,6 +38,8 @@ TRAINED_MODEL_DIR = env_str("TRAINED_MODEL_DIR", config.TRAINED_MODEL_DIR)
 EXPERIMENT_DIR = env_str("EXPERIMENT_DIR", None)
 TRAIN_DATA_PATH = Path(env_str("TRAIN_DATA_PATH", "train_data.csv"))
 RANDOM_SEED = env_int("RANDOM_SEED", 43)
+PRIMARY_AGENT_NAME = env_str("PRIMARY_AGENT_NAME", "ppo").strip().lower()
+REINFORCE_EVAL_INTERVAL = env_int("REINFORCE_EVAL_INTERVAL", 5)
 
 
 def get_reward_scaling(reward_type: str) -> float:
@@ -153,6 +156,7 @@ print(f"  TRAIN_TERMINAL_SKIP_DAYS: {TRAIN_TERMINAL_SKIP_DAYS}")
 print(f"  EXPERIMENT_DIR: {EXPERIMENT_DIR}")
 print(f"  TRAIN_DATA_PATH: {TRAIN_DATA_PATH}")
 print(f"  RANDOM_SEED: {RANDOM_SEED}")
+print(f"  REINFORCE_EVAL_INTERVAL: {REINFORCE_EVAL_INTERVAL}")
 
 # %% Part 1. Prepare directories
 
@@ -186,14 +190,15 @@ def _first_existing_column(df: pd.DataFrame, candidates: list[str]) -> str | Non
 
 
 def save_sb3_training_reward_curve(agent_name: str) -> None:
-    """Save the correct training reward curve for convergence analysis.
+    """Save the training reward curve used for convergence analysis.
 
-    Correct interpretation:
-      x-axis = SB3 training timesteps, not market dates.
-      y-axis = rollout/ep_rew_mean when available.
+    PPO / other SB3 agents:
+      x-axis = epoch (the sequential progress.csv record number).
+      y-axis = rollout/ep_rew_mean from Stable-Baselines3.
 
-    This curve comes from Stable-Baselines3 progress.csv, so it reflects reward
-    during the learning process and is suitable for checking convergence.
+    REINFORCE:
+      x-axis = epoch (one complete training episode).
+      y-axis = average reward within that episode.
     """
     progress_path = Path(RESULTS_DIR) / agent_name / "progress.csv"
     if not progress_path.exists():
@@ -205,25 +210,71 @@ def save_sb3_training_reward_curve(agent_name: str) -> None:
         print(f"SB3 progress.csv is empty for {agent_name}: {progress_path}")
         return
 
-    step_col = _first_existing_column(
+    is_reinforce = agent_name.lower() == "reinforce"
+    x_col = _first_existing_column(progress, ["episodes"]) if is_reinforce else None
+    timestep_col = None if is_reinforce else _first_existing_column(
         progress,
         ["time/total_timesteps", "total_timesteps", "time/iterations"],
     )
-    reward_col = _first_existing_column(
+    reward_col = None if is_reinforce else _first_existing_column(
         progress,
         ["rollout/ep_rew_mean", "ep_rew_mean", "train/reward", "rollout/episode_reward"],
     )
 
-    if step_col is None or reward_col is None:
+    if (is_reinforce and x_col is None) or (not is_reinforce and reward_col is None):
         print("Cannot plot convergence reward curve because required columns are missing.")
         print(f"progress.csv columns = {list(progress.columns)}")
         return
 
-    curve = progress[[step_col, reward_col]].copy()
-    curve = curve.rename(columns={step_col: "training_step", reward_col: "episode_reward_mean"})
-    curve["training_step"] = pd.to_numeric(curve["training_step"], errors="coerce")
-    curve["episode_reward_mean"] = pd.to_numeric(curve["episode_reward_mean"], errors="coerce")
-    curve = curve.dropna(subset=["training_step", "episode_reward_mean"]).reset_index(drop=True)
+    if is_reinforce:
+        average_col = "rollout/episode_average_reward"
+        total_col = "rollout/episode_reward"
+        length_col = "rollout/ep_len_mean"
+
+        if average_col in progress.columns:
+            curve = progress[[x_col, average_col]].copy()
+            curve = curve.rename(columns={x_col: "epoch", average_col: "average_reward"})
+        elif total_col in progress.columns and length_col in progress.columns:
+            # Compatibility with older progress.csv files: recover the exact
+            # per-episode average without using the old moving-average column.
+            curve = progress[[x_col, total_col, length_col]].copy()
+            curve = curve.rename(columns={x_col: "epoch"})
+            episode_total = pd.to_numeric(curve[total_col], errors="coerce")
+            episode_length = pd.to_numeric(curve[length_col], errors="coerce")
+            curve["average_reward"] = episode_total / episode_length.replace(0, np.nan)
+            curve = curve[["epoch", "average_reward"]]
+        else:
+            print(
+                "Cannot plot REINFORCE reward curve because per-episode reward "
+                "and episode length columns are missing."
+            )
+            print(f"progress.csv columns = {list(progress.columns)}")
+            return
+
+        curve["epoch"] = pd.to_numeric(curve["epoch"], errors="coerce")
+        curve["average_reward"] = pd.to_numeric(curve["average_reward"], errors="coerce")
+        curve = curve.dropna(subset=["epoch", "average_reward"]).reset_index(drop=True)
+        curve["epoch"] = curve["epoch"].astype(int)
+        plot_x_col = "epoch"
+        plot_y_col = "average_reward"
+        x_label = "epoch"
+        y_label = "average reward"
+    else:
+        selected_columns = [reward_col]
+        if timestep_col is not None:
+            selected_columns.insert(0, timestep_col)
+        curve = progress[selected_columns].copy()
+        curve = curve.rename(columns={reward_col: "average_reward"})
+        curve["average_reward"] = pd.to_numeric(curve["average_reward"], errors="coerce")
+        if timestep_col is not None:
+            curve = curve.rename(columns={timestep_col: "training_timestep"})
+            curve["training_timestep"] = pd.to_numeric(curve["training_timestep"], errors="coerce")
+        curve = curve.dropna(subset=["average_reward"]).reset_index(drop=True)
+        curve.insert(0, "epoch", np.arange(1, len(curve) + 1, dtype=int))
+        plot_x_col = "epoch"
+        plot_y_col = "average_reward"
+        x_label = "epoch"
+        y_label = "average reward"
 
     if curve.empty:
         print(f"No numeric reward data available in {progress_path}")
@@ -233,34 +284,32 @@ def save_sb3_training_reward_curve(agent_name: str) -> None:
     csv_path = OUTPUT_DIR / f"training_reward_curve_{suffix}.csv"
     png_path = OUTPUT_DIR / f"training_reward_curve_{suffix}.png"
 
-    # Save CSV with the original SB3 reward curve only.
+    # Keep the original SB3 reward values while using a common epoch axis.
     curve.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
     # Canonical filename requested by rolling experiment folder layout.
-    if agent_name.lower() == "ppo":
+    if agent_name.lower() == PRIMARY_AGENT_NAME:
         curve.to_csv(OUTPUT_DIR / "reward_curve.csv", index=False, encoding="utf-8-sig")
 
     fig, ax = plt.subplots(figsize=(15, 5))
 
     ax.plot(
-        curve["training_step"],
-        curve["episode_reward_mean"],
+        curve[plot_x_col],
+        curve[plot_y_col],
         linewidth=1.5,
         alpha=0.9,
-        label="Episode reward mean",
     )
 
     ax.set_title(f"Training Reward Convergence Curve - {agent_name.upper()} ({reward_display_name(REWARD_TYPE)})")
-    set_axis_labels_horizontal(ax, "Training timestep", "Mean episode reward", ylabel_pad=75)
+    set_axis_labels_horizontal(ax, x_label, y_label, ylabel_pad=75)
     ax.grid(True, alpha=0.25)
-    ax.legend()
     fig.tight_layout()
     fig.savefig(png_path, dpi=150, bbox_inches="tight")
     source_rows = [
         {
             "image": str(png_path.name),
             "image_path": str(png_path),
-            "source_role": "sb3_training_progress",
+            "source_role": "reinforce_training_progress" if is_reinforce else "sb3_training_progress",
             "source_csv": str(progress_path),
             "output_csv": str(csv_path),
             "stage": "train_repeat",
@@ -269,14 +318,14 @@ def save_sb3_training_reward_curve(agent_name: str) -> None:
             "training_data": str(TRAIN_DATA_PATH),
         }
     ]
-    if agent_name.lower() == "ppo":
-        canonical_png = OUTPUT_DIR / "training_reward_curve_ppo.png"
+    if agent_name.lower() == PRIMARY_AGENT_NAME:
+        canonical_png = OUTPUT_DIR / f"training_reward_curve_{PRIMARY_AGENT_NAME}.png"
         fig.savefig(canonical_png, dpi=150, bbox_inches="tight")
         source_rows.append(
             {
                 "image": canonical_png.name,
                 "image_path": str(canonical_png),
-                "source_role": "sb3_training_progress",
+                "source_role": "reinforce_training_progress" if is_reinforce else "sb3_training_progress",
                 "source_csv": str(progress_path),
                 "output_csv": str(csv_path),
                 "stage": "train_repeat",
@@ -288,8 +337,141 @@ def save_sb3_training_reward_curve(agent_name: str) -> None:
     save_image_source_manifest(source_rows)
     plt.close(fig)
 
-    print(f"SB3 training reward curve saved to {csv_path}")
-    print(f"SB3 training reward plot saved to {png_path}")
+    print(f"Training reward curve saved to {csv_path}")
+    print(f"Training reward plot saved to {png_path}")
+
+
+
+def save_reinforce_diagnostics() -> None:
+    """Copy REINFORCE training and reward-v4 diagnostics to the repeat folder."""
+    progress_path = Path(RESULTS_DIR) / "reinforce" / "progress.csv"
+    if not progress_path.exists():
+        print(f"No REINFORCE progress.csv found: {progress_path}")
+        return
+
+    progress = pd.read_csv(progress_path)
+    if progress.empty:
+        print(f"REINFORCE progress.csv is empty: {progress_path}")
+        return
+
+    diagnostic_columns = [
+        "episodes",
+        "time/total_timesteps",
+        "rollout/episode_reward",
+        "rollout/episode_average_reward",
+        "rollout/ep_len_mean",
+        "train/loss",
+        "train/policy_loss",
+        "train/entropy_loss",
+        "train/gradient_norm_before_clip",
+        "train/gradient_clipped",
+        "train/policy_std_mean",
+        "train/mean_abs_action",
+        "train/mean_abs_action_delta",
+        "reward_v4/zero_delta_ratio",
+        "reward_v4/mean_abs_delta_a",
+        "reward_v4/mean_abs_effective_delta_a",
+        "reward_v4/mean_abs_future_return",
+        "reward_v4/positive_reward_ratio",
+        "reward_v4/positive_step_reward_ratio",
+        "reward_v4/valid_action_count",
+        "reward_v4/diagnostic_step_count",
+        "eval/deterministic_episode_reward",
+        "eval/deterministic_final_asset",
+        "eval/deterministic_steps",
+    ]
+    available_columns = [col for col in diagnostic_columns if col in progress.columns]
+    diagnostics = progress[available_columns].copy()
+    output_path = OUTPUT_DIR / "reinforce_diagnostics.csv"
+    diagnostics.to_csv(output_path, index=False, encoding="utf-8-sig")
+    print(f"REINFORCE diagnostics saved to {output_path}")
+
+
+def save_reinforce_deterministic_evaluation_curve() -> None:
+    """Save the periodic deterministic evaluation curve from progress.csv."""
+    progress_path = Path(RESULTS_DIR) / "reinforce" / "progress.csv"
+    if not progress_path.exists():
+        print(f"No REINFORCE progress.csv found: {progress_path}")
+        return
+
+    progress = pd.read_csv(progress_path)
+    required = [
+        "episodes",
+        "eval/deterministic_episode_reward",
+        "eval/deterministic_final_asset",
+    ]
+    if progress.empty or any(col not in progress.columns for col in required):
+        print("Cannot plot deterministic evaluation curve because required columns are missing.")
+        return
+
+    curve = progress[required].copy()
+    curve = curve.rename(
+        columns={
+            "episodes": "epoch",
+            "eval/deterministic_episode_reward": "deterministic_reward",
+            "eval/deterministic_final_asset": "deterministic_final_asset",
+        }
+    )
+    for col in ["epoch", "deterministic_reward", "deterministic_final_asset"]:
+        curve[col] = pd.to_numeric(curve[col], errors="coerce")
+    curve = curve.dropna(subset=["epoch", "deterministic_reward"]).reset_index(drop=True)
+    if curve.empty:
+        print("No deterministic evaluation rows were recorded.")
+        return
+
+    curve["epoch"] = curve["epoch"].astype(int)
+    suffix = f"reinforce_{REWARD_TYPE}_seed_{RANDOM_SEED}_{today_str}"
+    csv_path = OUTPUT_DIR / f"deterministic_eval_curve_{suffix}.csv"
+    canonical_csv_path = OUTPUT_DIR / "deterministic_eval_curve.csv"
+    png_path = OUTPUT_DIR / f"deterministic_eval_curve_{suffix}.png"
+    canonical_png_path = OUTPUT_DIR / "deterministic_eval_curve.png"
+
+    curve.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    curve.to_csv(canonical_csv_path, index=False, encoding="utf-8-sig")
+
+    fig, ax = plt.subplots(figsize=(15, 5))
+    ax.plot(curve["epoch"], curve["deterministic_reward"], linewidth=2.0)
+    ax.set_title(
+        "Deterministic Evaluation Reward Curve - REINFORCE "
+        f"({reward_display_name(REWARD_TYPE)})"
+    )
+    set_axis_labels_horizontal(ax, "epoch", "deterministic reward", ylabel_pad=75)
+    ax.grid(True, alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(png_path, dpi=150, bbox_inches="tight")
+    fig.savefig(canonical_png_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    save_image_source_manifest(
+        [
+            {
+                "image": png_path.name,
+                "image_path": str(png_path),
+                "source_role": "reinforce_periodic_deterministic_evaluation",
+                "source_csv": str(progress_path),
+                "output_csv": str(csv_path),
+                "stage": "train_repeat_diagnostic_eval",
+                "reward_type": REWARD_TYPE,
+                "random_seed": RANDOM_SEED,
+                "training_data": str(TRAIN_DATA_PATH),
+                "eval_interval_epochs": REINFORCE_EVAL_INTERVAL,
+            },
+            {
+                "image": canonical_png_path.name,
+                "image_path": str(canonical_png_path),
+                "source_role": "reinforce_periodic_deterministic_evaluation",
+                "source_csv": str(progress_path),
+                "output_csv": str(canonical_csv_path),
+                "stage": "train_repeat_diagnostic_eval",
+                "reward_type": REWARD_TYPE,
+                "random_seed": RANDOM_SEED,
+                "training_data": str(TRAIN_DATA_PATH),
+                "eval_interval_epochs": REINFORCE_EVAL_INTERVAL,
+            },
+        ]
+    )
+    print(f"Deterministic evaluation curve saved to {csv_path}")
+    print(f"Deterministic evaluation plot saved to {png_path}")
 
 
 def plot_train_eval_reward_curve(rewards, plot_path, agent_name):
@@ -377,7 +559,7 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
     reward_path = OUTPUT_DIR / f"train_eval_reward_by_step_{suffix}.csv"
     plot_path = OUTPUT_DIR / f"train_eval_cumulative_reward_by_step_{suffix}.png"
     rewards.to_csv(reward_path, index=False, encoding="utf-8-sig")
-    if agent_name.lower() == "ppo":
+    if agent_name.lower() == PRIMARY_AGENT_NAME:
         rewards.to_csv(OUTPUT_DIR / "train_eval_reward_curve.csv", index=False, encoding="utf-8-sig")
     plot_train_eval_reward_curve(rewards, plot_path, agent_name)
 
@@ -452,12 +634,14 @@ print(type(env_train))
 if_using_a2c = env_bool("IF_USING_A2C", False)
 if_using_ddpg = env_bool("IF_USING_DDPG", False)
 if_using_ppo = env_bool("IF_USING_PPO", True)
+if_using_reinforce = env_bool("IF_USING_REINFORCE", False)
 if_using_td3 = env_bool("IF_USING_TD3", False)
 if_using_sac = env_bool("IF_USING_SAC", False)
 
 A2C_TOTAL_TIMESTEPS = env_int("A2C_TOTAL_TIMESTEPS", 20000)
 DDPG_TOTAL_TIMESTEPS = env_int("DDPG_TOTAL_TIMESTEPS", 20000)
 PPO_TOTAL_TIMESTEPS = env_int("PPO_TOTAL_TIMESTEPS", 100000)
+REINFORCE_TOTAL_TIMESTEPS = env_int("REINFORCE_TOTAL_TIMESTEPS", 100000)
 TD3_TOTAL_TIMESTEPS = env_int("TD3_TOTAL_TIMESTEPS", 20000)
 SAC_TOTAL_TIMESTEPS = env_int("SAC_TOTAL_TIMESTEPS", 20000)
 
@@ -520,6 +704,45 @@ if if_using_ppo:
     trained_ppo.save(TRAINED_MODEL_DIR + "/agent_ppo")
     save_sb3_training_reward_curve("ppo")
     evaluate_on_train_and_save_reward_curve(trained_ppo, "ppo")
+
+# --- Agent 3b: REINFORCE / Policy Gradient ---
+trained_reinforce = None
+if if_using_reinforce:
+    reinforce_progress_path = Path(RESULTS_DIR) / "reinforce" / "progress.csv"
+
+    # Use a separate environment so deterministic evaluation does not change
+    # the training environment state or its reward-v4 diagnostics.
+    reinforce_eval_gym = StockTradingEnv(
+        df=train,
+        reward_type=REWARD_TYPE,
+        reward_params=REWARD_PARAMS,
+        **env_kwargs,
+    )
+    reinforce_eval_env, _ = reinforce_eval_gym.get_sb_env()
+    reinforce_eval_env.seed(RANDOM_SEED)
+
+    model_reinforce = ReinforceAgent(
+        state_dim=state_space,
+        action_dim=stock_dimension,
+        hidden_dim=env_int("REINFORCE_HIDDEN_DIM", 256),
+        learning_rate=float(os.environ.get("REINFORCE_LEARNING_RATE", "0.0003")),
+        gamma=float(os.environ.get("REINFORCE_GAMMA", "0.99")),
+        ent_coef=float(os.environ.get("REINFORCE_ENT_COEF", "0.001")),
+        max_grad_norm=float(os.environ.get("REINFORCE_MAX_GRAD_NORM", "0.5")),
+        seed=RANDOM_SEED,
+    )
+    trained_reinforce = model_reinforce.learn(
+        env=env_train,
+        total_timesteps=REINFORCE_TOTAL_TIMESTEPS,
+        progress_path=reinforce_progress_path,
+        eval_env=reinforce_eval_env,
+        eval_interval=REINFORCE_EVAL_INTERVAL,
+    )
+    trained_reinforce.save(TRAINED_MODEL_DIR + "/agent_reinforce")
+    save_reinforce_diagnostics()
+    save_sb3_training_reward_curve("reinforce")
+    save_reinforce_deterministic_evaluation_curve()
+    evaluate_on_train_and_save_reward_curve(trained_reinforce, "reinforce")
 
 # --- Agent 4: TD3 ---
 agent = DRLAgent(env=env_train)
