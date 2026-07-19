@@ -31,6 +31,7 @@ from finrl import config
 #   "v2" = sum(action * future t+n day simple return)
 #   "v3" = sum(action * future n-day average simple return)
 #   "v4" = sum(effective delta action * future n-day average simple return)
+#   "v5" = sum(post-trade stock weight * future n-day average return)
 
 REWARD_TYPE = "v0"
 
@@ -54,6 +55,10 @@ REWARD_PARAMS_BY_TYPE = {
         "price_col": "close",
         "c": 0.05,
     },
+    "v5": {
+        "n_future": 20,
+        "price_col": "close",
+    },
 }
 
 REWARD_PARAMS = REWARD_PARAMS_BY_TYPE.get(REWARD_TYPE, {})
@@ -74,11 +79,18 @@ REWARD_DISPLAY_NAMES = {
     "reward_v4": "future_avg_delta_action_reward",
     "future_avg_delta_action_return": "future_avg_delta_action_reward",
     "future_avg_delta_action_reward": "future_avg_delta_action_reward",
+    "v5": "portfolio_weighted_future_return_reward",
+    "reward_v5": "portfolio_weighted_future_return_reward",
+    "weight_future": "portfolio_weighted_future_return_reward",
+    "reward_weight_future": "portfolio_weighted_future_return_reward",
+    "weight_future_reward": "portfolio_weighted_future_return_reward",
+    "portfolio_weighted_future_return": "portfolio_weighted_future_return_reward",
+    "portfolio_weighted_future_return_reward": "portfolio_weighted_future_return_reward",
 }
 
 
 def reward_display_name(reward_type: str | None) -> str:
-    """Return the display name used in plots instead of v0/v1/v2/v3/v4."""
+    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5."""
     key = str(reward_type or "").strip().lower()
     if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
         key = key[len("reward_"):]
@@ -289,7 +301,8 @@ RUN_TRAIN = True
 RUN_BACKTEST = True
 
 # 是否在 rolling 實驗結束後自動使用「最新」v0 與目前 REWARD_TYPE 產生比較圖。
-# 例如 REWARD_TYPE="v2" 時，會產生 v0 vs v2；REWARD_TYPE="v4" 時，會產生 v0 vs v4。
+# 例如 REWARD_TYPE="v2" 時，會產生 v0 vs v2；
+# REWARD_TYPE="v5" 時，會產生 v0 vs v5。
 # 建議正式實驗設為 False，改用 examples/Compare_V0_V1_Manual.py 手動指定資料夾。
 AUTO_COMPARE_LATEST = False
 
@@ -307,11 +320,11 @@ AUTO_COMPARE_CONTINUOUS_LATEST = False
 # Agent 開關：train 和 backtest 會共用這裡的設定
 # PRIMARY_AGENT_NAME 會決定 Annual Reset、Continuous 5Y 與 canonical 圖檔使用哪個 Agent。
 # 若指定的 Agent 沒有開啟，程式會自動改用第一個已開啟的 Agent。
-PRIMARY_AGENT_NAME = "ppo"
+PRIMARY_AGENT_NAME = "reinforce" # "ppo" "reinforce" 
 IF_USING_A2C = False
 IF_USING_DDPG = False
-IF_USING_PPO = True
-IF_USING_REINFORCE = False
+IF_USING_PPO = False
+IF_USING_REINFORCE = True
 IF_USING_TD3 = False
 IF_USING_SAC = False
 
@@ -467,14 +480,21 @@ def create_rolling_root() -> Path:
     date_tag = datetime.now().strftime("%Y%m%d")
     start_year = _year(ROLLING_START_DATE)
     end_year = _year(ROLLING_END_DATE)
-    run_name = (
+    model_name = primary_agent_name()
+    run_prefix = (
         f"rolling_{start_year}-{end_year}_"
         f"train{TRAIN_YEARS}y_test{TEST_YEARS}y_shift{SHIFT_YEARS}y_"
         f"{date_tag}"
     )
+    run_name = f"{run_prefix}_{model_name}"
     rolling_root = Path(EXPERIMENT_ROOT) / f"reward_{REWARD_TYPE}" / run_name
     if rolling_root.exists():
-        rolling_root = Path(EXPERIMENT_ROOT) / f"reward_{REWARD_TYPE}" / f"{run_name}_{datetime.now().strftime('%H%M%S')}"
+        time_tag = datetime.now().strftime("%H%M%S")
+        rolling_root = (
+            Path(EXPERIMENT_ROOT)
+            / f"reward_{REWARD_TYPE}"
+            / f"{run_prefix}_{time_tag}_{model_name}"
+        )
     rolling_root.mkdir(parents=True, exist_ok=True)
     return rolling_root
 
@@ -1640,6 +1660,12 @@ def normalize_reward_type_for_continuous(value: str | None) -> str:
         "future_avg_return": "v3",
         "future_avg_delta_action_return": "v4",
         "future_avg_delta_action_reward": "v4",
+        "reward_v5": "v5",
+        "weight_future": "v5",
+        "reward_weight_future": "v5",
+        "weight_future_reward": "v5",
+        "portfolio_weighted_future_return": "v5",
+        "portfolio_weighted_future_return_reward": "v5",
     }
     return aliases.get(text, text)
 

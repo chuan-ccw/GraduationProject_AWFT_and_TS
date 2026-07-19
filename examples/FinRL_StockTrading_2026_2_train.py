@@ -47,7 +47,7 @@ def get_reward_scaling(reward_type: str) -> float:
     Choose reward_scaling by reward definition.
 
     v0 is a money-difference reward, so it keeps FinRL's original 1e-4.
-    v1/v2/v3/v4 are return-level rewards, so they should not be shrunk by 1e-4.
+    v1/v2/v3/v4/v5 are return-level rewards, so they should not be shrunk by 1e-4.
     """
     reward_key = str(reward_type).lower()
 
@@ -67,6 +67,13 @@ def get_reward_scaling(reward_type: str) -> float:
         "reward_v4",
         "future_avg_delta_action_return",
         "future_avg_delta_action_reward",
+        "v5",
+        "reward_v5",
+        "weight_future",
+        "reward_weight_future",
+        "weight_future_reward",
+        "portfolio_weighted_future_return",
+        "portfolio_weighted_future_return_reward",
     }:
         return 1.0
 
@@ -91,11 +98,18 @@ REWARD_DISPLAY_NAMES = {
     "reward_v4": "future_avg_delta_action_reward",
     "future_avg_delta_action_return": "future_avg_delta_action_reward",
     "future_avg_delta_action_reward": "future_avg_delta_action_reward",
+    "v5": "portfolio_weighted_future_return_reward",
+    "reward_v5": "portfolio_weighted_future_return_reward",
+    "weight_future": "portfolio_weighted_future_return_reward",
+    "reward_weight_future": "portfolio_weighted_future_return_reward",
+    "weight_future_reward": "portfolio_weighted_future_return_reward",
+    "portfolio_weighted_future_return": "portfolio_weighted_future_return_reward",
+    "portfolio_weighted_future_return_reward": "portfolio_weighted_future_return_reward",
 }
 
 
 def reward_display_name(reward_type: str | None) -> str:
-    """Return the display name used in plots instead of v0/v1/v2/v3/v4."""
+    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5."""
     key = str(reward_type or "").strip().lower()
     if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
         key = key[len("reward_"):]
@@ -121,6 +135,13 @@ def get_future_reward_train_skip_days(reward_type: str, reward_params: dict) -> 
         "reward_v4",
         "future_avg_delta_action_return",
         "future_avg_delta_action_reward",
+        "v5",
+        "reward_v5",
+        "weight_future",
+        "reward_weight_future",
+        "weight_future_reward",
+        "portfolio_weighted_future_return",
+        "portfolio_weighted_future_return_reward",
     }
     if reward_key not in future_reward_keys:
         return 0

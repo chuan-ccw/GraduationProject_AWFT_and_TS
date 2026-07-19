@@ -15,6 +15,7 @@ class RewardContext:
     end_total_asset: float
     raw_actions: np.ndarray
     current_prices_before_trade: np.ndarray
+    stock_weights_after_trade: np.ndarray
     cost_before_trade: float
     current_day: int
     tic_list: list
@@ -110,6 +111,39 @@ def _action_to_unit_array(actions: np.ndarray, hmax: float, eps: float = 1e-8) -
         actions = actions / (hmax + eps)
 
     return np.clip(actions, -1.0, 1.0)
+
+
+def calculate_stock_weights_after_trade(
+    stock_prices: np.ndarray,
+    stock_holdings: np.ndarray,
+    cash_after_trade: float,
+    eps: float = 1e-8,
+) -> np.ndarray:
+    """Calculate each stock's market-value weight immediately after trading.
+
+    Formula:
+        weight_i = price_i * shares_i / total_asset
+        total_asset = cash + sum_j(price_j * shares_j)
+
+    Cash is included in total_asset, so stock weights can sum to less than 1.
+    """
+    prices = np.asarray(stock_prices, dtype=float)
+    holdings = np.asarray(stock_holdings, dtype=float)
+
+    if prices.shape != holdings.shape:
+        raise ValueError(
+            "stock_prices and stock_holdings must have the same shape, "
+            f"got {prices.shape} and {holdings.shape}."
+        )
+
+    stock_values = prices * holdings
+    total_asset = float(cash_after_trade) + float(np.sum(stock_values))
+
+    if not np.isfinite(total_asset) or total_asset <= eps:
+        return np.zeros_like(stock_values, dtype=float)
+
+    weights = stock_values / total_asset
+    return np.where(np.isfinite(weights), weights, 0.0)
 
 
 def _get_price_matrix(
@@ -468,6 +502,82 @@ def reward_v4(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     return float(np.sum(effective_delta_a[valid] * future_avg_returns[valid]))
 
 
+def reward_v5(
+    ctx: RewardContext,
+    params: Dict[str, Any] | None = None,
+) -> float:
+    """Portfolio-weighted future-return reward.
+
+    The stock weights are calculated immediately after the agent's trades have
+    been executed, using the current-day prices and the actual resulting share
+    holdings.
+
+    Formula:
+        R_t = sum_i w(i,t) * future_avg_returns(i,t)
+
+        w(i,t) = market_value(i,t) / total_asset(t)
+
+        market_value(i,t) = shares(i,t) * p(i,t)
+
+        future_avg_returns(i,t)
+            = (avg_p(i,t)^n - p(i,t)) / p(i,t)
+
+        avg_p(i,t)^n = 1/n * sum_{k=t+1}^{t+n} p(i,k)
+
+    Cash is included in total_asset(t), so sum_i w(i,t) may be smaller than 1.
+    """
+    params = params or {}
+
+    eps = float(params.get("eps", 1e-8))
+    n_future = int(params.get("n_future", 5))
+    price_col = params.get("price_col", "close")
+
+    price_matrix, day_to_pos = _get_price_matrix(ctx.env, ctx.tic_list, price_col)
+
+    current_pos = day_to_pos.get(ctx.current_day)
+    if current_pos is None:
+        return 0.0
+
+    start_pos = current_pos + 1
+    end_pos = current_pos + n_future + 1
+    if end_pos > price_matrix.shape[0]:
+        return 0.0
+
+    future_window = price_matrix[start_pos:end_pos]
+    current_prices = np.asarray(ctx.current_prices_before_trade, dtype=float)
+    stock_weights = np.asarray(ctx.stock_weights_after_trade, dtype=float)
+    avg_future_prices = np.nanmean(future_window, axis=0)
+    future_avg_returns = (avg_future_prices - current_prices) / (
+        current_prices + eps
+    )
+
+    if stock_weights.shape != current_prices.shape:
+        raise ValueError(
+            "stock_weights_after_trade and current_prices_before_trade must "
+            f"have the same shape, got {stock_weights.shape} and "
+            f"{current_prices.shape}."
+        )
+
+    valid = (
+        np.isfinite(current_prices)
+        & np.isfinite(avg_future_prices)
+        & np.isfinite(future_avg_returns)
+        & np.isfinite(stock_weights)
+        & np.all(np.isfinite(future_window), axis=0)
+        & (current_prices > eps)
+        & (avg_future_prices > eps)
+    )
+
+    if not np.any(valid):
+        return 0.0
+
+    return float(np.sum(stock_weights[valid] * future_avg_returns[valid]))
+
+
+# Backward-compatible function name for code created before the v5 alias.
+reward_weight_future = reward_v5
+
+
 REWARD_FUNCTIONS = {
     "v0": reward_v0,
     "original": reward_v0,
@@ -488,6 +598,14 @@ REWARD_FUNCTIONS = {
     "reward_v4": reward_v4,
     "future_avg_delta_action_return": reward_v4,
     "future_avg_delta_action_reward": reward_v4,
+
+    "v5": reward_v5,
+    "reward_v5": reward_v5,
+    "weight_future": reward_v5,
+    "reward_weight_future": reward_v5,
+    "weight_future_reward": reward_v5,
+    "portfolio_weighted_future_return": reward_v5,
+    "portfolio_weighted_future_return_reward": reward_v5,
 }
 
 

@@ -32,14 +32,14 @@ except Exception:
 # =====================================================
 # 使用流程：
 # 1. 先跑 v0 rolling 實驗。
-# 2. 再跑任一新版 reward，例如 v1 / v2 / v3 / v4。
+# 2. 再跑任一新版 reward，例如 v1 / v2 / v3 / v4 / v5。
 # 3. 直接執行本檔案。程式會「永遠用 v0 當 baseline」，target 版本會依資料夾/資料自動偵測。
 #
 # 重要：
 # - V0_ROLLING_NAME 留空：自動找最新 reward_v0/rolling_*。
 # - TARGET_ROLLING_NAME 留空：依 TARGET_REWARD_TYPE 自動找最新 reward_<target>/rolling_*。
 # - TARGET_REWARD_TYPE 留空：優先讀環境變數 REWARD_TYPE，其次讀 config.REWARD_TYPE。
-# - 若 TARGET_ROLLING_NAME 是完整路徑，程式會從該路徑自動偵測 v1/v2/v3/v4。
+# - 若 TARGET_ROLLING_NAME 是完整路徑，程式會從該路徑自動偵測 reward 類型。
 
 EXPERIMENT_ROOT = os.environ.get(
     "EXPERIMENT_ROOT",
@@ -54,7 +54,7 @@ EXPERIMENT_ROOT = os.environ.get(
 V0_ROLLING_NAME = ""
 TARGET_ROLLING_NAME = ""
 
-# 可填 "v1" / "v2" / "v3" / "v4"；留空 = 用目前 REWARD_TYPE/config.REWARD_TYPE，再由資料夾校正。
+# 可填 "v1" / "v2" / "v3" / "v4" / "v5"；留空 = 用目前設定，再由資料夾校正。
 TARGET_REWARD_TYPE = os.environ.get("TARGET_REWARD_TYPE", os.environ.get("REWARD_TYPE", getattr(config, "REWARD_TYPE", "v1")))
 
 # 輸出資料夾名稱。留空時自動產生 compare_v0_<target>_...。
@@ -89,11 +89,18 @@ REWARD_DISPLAY_NAMES = {
     "reward_v4": "future_avg_delta_action_reward",
     "future_avg_delta_action_return": "future_avg_delta_action_reward",
     "future_avg_delta_action_reward": "future_avg_delta_action_reward",
+    "v5": "portfolio_weighted_future_return_reward",
+    "reward_v5": "portfolio_weighted_future_return_reward",
+    "weight_future": "portfolio_weighted_future_return_reward",
+    "reward_weight_future": "portfolio_weighted_future_return_reward",
+    "weight_future_reward": "portfolio_weighted_future_return_reward",
+    "portfolio_weighted_future_return": "portfolio_weighted_future_return_reward",
+    "portfolio_weighted_future_return_reward": "portfolio_weighted_future_return_reward",
 }
 
 
 def reward_display_name(reward_type: str | None) -> str:
-    """Return the display name used in plots instead of v0/v1/v2/v3/v4."""
+    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5."""
     key = str(reward_type or "").strip().lower()
     if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
         key = key[len("reward_"):]
@@ -129,6 +136,12 @@ def normalize_reward_type(value: str | None) -> str:
         "reward_v4": "v4",
         "future_avg_delta_action_return": "v4",
         "future_avg_delta_action_reward": "v4",
+        "reward_v5": "v5",
+        "weight_future": "v5",
+        "reward_weight_future": "v5",
+        "weight_future_reward": "v5",
+        "portfolio_weighted_future_return": "v5",
+        "portfolio_weighted_future_return_reward": "v5",
     }
     return aliases.get(text, text)
 
@@ -675,7 +688,7 @@ def main() -> None:
     target_reward_type = detect_reward_type_from_rolling_root(root_target, requested_target)
 
     if target_reward_type == "v0":
-        raise ValueError("target_reward_type 偵測為 v0；compare 需要 v0 以外的版本，例如 v1/v2/v3/v4。")
+        raise ValueError("target_reward_type 偵測為 v0；compare 需要 v0 以外的 reward。")
 
     df_v0 = collect_compare_series(root_v0, "v0", COMPARE_DATA_MODE)
     df_target = collect_compare_series(root_target, target_reward_type, COMPARE_DATA_MODE)

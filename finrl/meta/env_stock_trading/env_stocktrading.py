@@ -11,7 +11,11 @@ from gymnasium import spaces
 from gymnasium.utils import seeding
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from finrl.meta.env_stock_trading.reward_functions import RewardContext, calculate_reward
+from finrl.meta.env_stock_trading.reward_functions import (
+    RewardContext,
+    calculate_reward,
+    calculate_stock_weights_after_trade,
+)
 
 matplotlib.use("Agg")
 
@@ -387,6 +391,20 @@ class StockTradingEnv(gym.Env):
                 actions[index] = self._buy_stock(index, actions[index])
 
             self.last_cash_after_buy = float(self.state[0])
+
+            # Calculate each stock's portfolio weight immediately after the
+            # requested trades have actually been executed. Use the current-day
+            # prices here, before state advances to the next trading day.
+            stock_holdings_after_trade = np.asarray(
+                self.state[(self.stock_dim + 1) : (self.stock_dim * 2 + 1)],
+                dtype=float,
+            )
+            stock_weights_after_trade = calculate_stock_weights_after_trade(
+                stock_prices=current_prices_before_trade,
+                stock_holdings=stock_holdings_after_trade,
+                cash_after_trade=self.last_cash_after_buy,
+            )
+
             self.actions_memory.append(actions)
 
             # state: s -> s+1
@@ -416,6 +434,7 @@ class StockTradingEnv(gym.Env):
                 end_total_asset=end_total_asset,
                 raw_actions=raw_actions,
                 current_prices_before_trade=current_prices_before_trade,
+                stock_weights_after_trade=stock_weights_after_trade,
                 cost_before_trade=cost_before_trade,
                 current_day=current_day,
                 tic_list=tic_list,
