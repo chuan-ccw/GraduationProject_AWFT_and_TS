@@ -255,7 +255,10 @@ class ReinforceAgent:
             rewards: list[float] = []
             sampled_actions: list[np.ndarray] = []
 
-            while not done and total_steps < int(total_timesteps):
+            # Once an episode starts, finish it before stopping training.
+            # total_steps may therefore exceed total_timesteps by at most
+            # one episode, which avoids recording and training on a partial epoch.
+            while not done:
                 action, log_prob, entropy = self._sample_action(obs)
                 obs, reward, dones, _infos = self._unpack_step(env.step(action))
                 reward_value = self._scalar(reward)

@@ -30,6 +30,7 @@ calculate_stock_weights_after_trade = (
 )
 calculate_reward = _REWARD_MODULE.calculate_reward
 reward_v5 = _REWARD_MODULE.reward_v5
+reward_v6 = _REWARD_MODULE.reward_v6
 
 
 def _make_price_df() -> pd.DataFrame:
@@ -105,3 +106,56 @@ def test_v5_and_formal_name_dispatch_to_same_reward() -> None:
     assert np.isclose(reward_by_v5, 0.05)
     assert np.isclose(reward_by_formal_name, reward_by_v5)
 
+
+
+def test_reward_v6_uses_change_in_post_trade_weights() -> None:
+    env = SimpleNamespace(df=_make_price_df())
+    ctx = RewardContext(
+        env=env,
+        begin_total_asset=800.0,
+        end_total_asset=800.0,
+        raw_actions=np.array([100.0, -100.0]),
+        current_prices_before_trade=np.array([10.0, 20.0]),
+        stock_weights_after_trade=np.array([0.40, 0.10]),
+        previous_stock_weights_after_trade=np.array([0.25, 0.25]),
+        cost_before_trade=0.0,
+        current_day=0,
+        tic_list=["AAA", "BBB"],
+    )
+
+    reward = reward_v6(
+        ctx,
+        {"n_future": 2, "price_col": "close"},
+    )
+
+    # delta_w = [+0.15, -0.15].
+    # AAA future return = +20%; BBB future return = 0%.
+    # reward = 0.15 * 0.20 + (-0.15) * 0.00 = 0.03.
+    assert np.isclose(reward, 0.03)
+
+
+def test_v6_and_formal_name_dispatch_to_same_reward() -> None:
+    env = SimpleNamespace(df=_make_price_df())
+    ctx = RewardContext(
+        env=env,
+        begin_total_asset=800.0,
+        end_total_asset=800.0,
+        raw_actions=np.array([100.0, -100.0]),
+        current_prices_before_trade=np.array([10.0, 20.0]),
+        stock_weights_after_trade=np.array([0.40, 0.10]),
+        previous_stock_weights_after_trade=np.array([0.25, 0.25]),
+        cost_before_trade=0.0,
+        current_day=0,
+        tic_list=["AAA", "BBB"],
+    )
+    params = {"n_future": 2, "price_col": "close"}
+
+    reward_by_v6 = calculate_reward("v6", ctx, params)
+    reward_by_formal_name = calculate_reward(
+        "portfolio_weight_change_future_return_reward",
+        ctx,
+        params,
+    )
+
+    assert np.isclose(reward_by_v6, 0.03)
+    assert np.isclose(reward_by_formal_name, reward_by_v6)

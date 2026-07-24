@@ -54,7 +54,7 @@ EXPERIMENT_ROOT = os.environ.get(
 V0_ROLLING_NAME = ""
 TARGET_ROLLING_NAME = ""
 
-# 可填 "v1" / "v2" / "v3" / "v4" / "v5"；留空 = 用目前設定，再由資料夾校正。
+# 可填 "v1" / "v2" / "v3" / "v4" / "v5" / "v6"；留空 = 用目前設定，再由資料夾校正。
 TARGET_REWARD_TYPE = os.environ.get("TARGET_REWARD_TYPE", os.environ.get("REWARD_TYPE", getattr(config, "REWARD_TYPE", "v1")))
 
 # 輸出資料夾名稱。留空時自動產生 compare_v0_<target>_...。
@@ -96,11 +96,18 @@ REWARD_DISPLAY_NAMES = {
     "weight_future_reward": "portfolio_weighted_future_return_reward",
     "portfolio_weighted_future_return": "portfolio_weighted_future_return_reward",
     "portfolio_weighted_future_return_reward": "portfolio_weighted_future_return_reward",
+    "v6": "portfolio_weight_change_future_return_reward",
+    "reward_v6": "portfolio_weight_change_future_return_reward",
+    "delta_weight_future": "portfolio_weight_change_future_return_reward",
+    "reward_delta_weight_future": "portfolio_weight_change_future_return_reward",
+    "delta_weight_future_reward": "portfolio_weight_change_future_return_reward",
+    "portfolio_weight_change_future_return": "portfolio_weight_change_future_return_reward",
+    "portfolio_weight_change_future_return_reward": "portfolio_weight_change_future_return_reward",
 }
 
 
 def reward_display_name(reward_type: str | None) -> str:
-    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5."""
+    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5/v6."""
     key = str(reward_type or "").strip().lower()
     if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
         key = key[len("reward_"):]
@@ -142,6 +149,12 @@ def normalize_reward_type(value: str | None) -> str:
         "weight_future_reward": "v5",
         "portfolio_weighted_future_return": "v5",
         "portfolio_weighted_future_return_reward": "v5",
+        "reward_v6": "v6",
+        "delta_weight_future": "v6",
+        "reward_delta_weight_future": "v6",
+        "delta_weight_future_reward": "v6",
+        "portfolio_weight_change_future_return": "v6",
+        "portfolio_weight_change_future_return_reward": "v6",
     }
     return aliases.get(text, text)
 

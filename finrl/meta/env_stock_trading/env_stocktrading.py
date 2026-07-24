@@ -126,6 +126,8 @@ class StockTradingEnv(gym.Env):
         self.last_cash_after_sell = float(self.state[0])
         self.last_cash_after_buy = float(self.state[0])
         self.holdings_memory = [self._get_holdings_snapshot()]
+        self.post_trade_weights_memory = []
+        self.previous_stock_weights_after_trade = self._calculate_state_stock_weights()
         self.date_memory = [self._get_date()]
         #         self.logger = Logger('results',[CSVOutputFormat])
         # self.reset()
@@ -302,6 +304,13 @@ class StockTradingEnv(gym.Env):
                         self.mode, self.model_name, self.iteration
                     )
                 )
+                df_post_trade_weights = self.save_weight_memory()
+                df_post_trade_weights.to_csv(
+                    "results/post_trade_weights_{}_{}_{}.csv".format(
+                        self.mode, self.model_name, self.iteration
+                    ),
+                    index=False,
+                )
                 df_total_value.to_csv(
                     "results/account_value_{}_{}_{}.csv".format(
                         self.mode, self.model_name, self.iteration
@@ -367,6 +376,14 @@ class StockTradingEnv(gym.Env):
             # 記錄交易發生的當下是第幾天
             current_day = self.day
 
+            # Reward v6 compares today's post-trade weights with the previous
+            # trading day's post-trade weights. At reset, this stores the
+            # starting portfolio weights before the first action.
+            previous_stock_weights_after_trade = np.asarray(
+                self.previous_stock_weights_after_trade,
+                dtype=float,
+            ).copy()
+
             # 記錄股票順序
             if self.stock_dim == 1:
                 tic_list = [self.data.tic]
@@ -404,6 +421,16 @@ class StockTradingEnv(gym.Env):
                 stock_holdings=stock_holdings_after_trade,
                 cash_after_trade=self.last_cash_after_buy,
             )
+            self.post_trade_weights_memory.append(
+                self._get_post_trade_weight_snapshot(
+                    trade_date=self._get_date(),
+                    tic_list=tic_list,
+                    stock_prices=current_prices_before_trade,
+                    stock_holdings=stock_holdings_after_trade,
+                    stock_weights=stock_weights_after_trade,
+                    cash_after_trade=self.last_cash_after_buy,
+                )
+            )
 
             self.actions_memory.append(actions)
 
@@ -438,12 +465,18 @@ class StockTradingEnv(gym.Env):
                 cost_before_trade=cost_before_trade,
                 current_day=current_day,
                 tic_list=tic_list,
+                previous_stock_weights_after_trade=(
+                    previous_stock_weights_after_trade
+                ),
             )
 
             self.reward = calculate_reward(
                 reward_type=self.reward_type,
                 ctx=reward_context,
                 params=self.reward_params,
+            )
+            self.previous_stock_weights_after_trade = (
+                stock_weights_after_trade.copy()
             )
 
             # Store unscaled reward for observation/debugging.
@@ -498,6 +531,8 @@ class StockTradingEnv(gym.Env):
         self.last_cash_after_sell = float(self.state[0])
         self.last_cash_after_buy = float(self.state[0])
         self.holdings_memory = [self._get_holdings_snapshot()]
+        self.post_trade_weights_memory = []
+        self.previous_stock_weights_after_trade = self._calculate_state_stock_weights()
         self.date_memory = [self._get_date()]
 
         self.episode += 1
@@ -602,6 +637,20 @@ class StockTradingEnv(gym.Env):
             return list(self.data.tic.values)
         return [self.data.tic]
 
+    def _calculate_state_stock_weights(self):
+        """Calculate stock weights represented by the current environment state."""
+        return calculate_stock_weights_after_trade(
+            stock_prices=np.asarray(
+                self.state[1 : (self.stock_dim + 1)],
+                dtype=float,
+            ),
+            stock_holdings=np.asarray(
+                self.state[(self.stock_dim + 1) : (self.stock_dim * 2 + 1)],
+                dtype=float,
+            ),
+            cash_after_trade=float(self.state[0]),
+        )
+
     def _get_holdings_snapshot(self):
         cash = float(self.state[0])
         cash_after_sell = float(getattr(self, "last_cash_after_sell", cash))
@@ -614,6 +663,58 @@ class StockTradingEnv(gym.Env):
         df_holdings = pd.DataFrame(self.holdings_memory, columns=columns)
         df_holdings.insert(0, "date", self.date_memory[: len(df_holdings)])
         return df_holdings
+
+    def _get_post_trade_weight_snapshot(
+        self,
+        trade_date,
+        tic_list,
+        stock_prices,
+        stock_holdings,
+        stock_weights,
+        cash_after_trade,
+    ):
+        """Build one row of portfolio weights immediately after trading.
+
+        Weight values are stored as fractions in [0, 1], not percentages.
+        The stock columns match the exact weights used by reward v5.
+        """
+        prices = np.asarray(stock_prices, dtype=float)
+        holdings = np.asarray(stock_holdings, dtype=float)
+        weights = np.asarray(stock_weights, dtype=float)
+        cash = float(cash_after_trade)
+        total_asset = cash + float(np.sum(prices * holdings))
+
+        if np.isfinite(total_asset) and total_asset > 1e-8:
+            cash_weight = cash / total_asset
+        else:
+            cash_weight = 0.0
+
+        stock_weight_sum = float(np.sum(weights))
+        snapshot = {
+            "date": trade_date,
+            "cash_after_trade": cash,
+            "total_asset_after_trade": total_asset,
+            "cash_weight": cash_weight,
+            "stock_weight_sum": stock_weight_sum,
+            "total_weight": cash_weight + stock_weight_sum,
+        }
+        snapshot.update(
+            {str(tic): float(weight) for tic, weight in zip(tic_list, weights)}
+        )
+        return snapshot
+
+    def save_weight_memory(self):
+        """Return each executed trading day's post-trade portfolio weights."""
+        metadata_columns = [
+            "date",
+            "cash_after_trade",
+            "total_asset_after_trade",
+            "cash_weight",
+            "stock_weight_sum",
+            "total_weight",
+        ]
+        columns = metadata_columns + self._get_tic_list()
+        return pd.DataFrame(self.post_trade_weights_memory).reindex(columns=columns)
 
     def save_reward_memory(self):
         # rewards_memory stores unscaled rewards before reward_scaling.

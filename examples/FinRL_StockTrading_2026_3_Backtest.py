@@ -57,7 +57,7 @@ def get_reward_scaling(reward_type: str) -> float:
     Choose reward_scaling by reward definition.
 
     v0 is a money-difference reward, so it keeps FinRL's original 1e-4.
-    v1/v2/v3/v4/v5 are return-level rewards, so they should not be shrunk by 1e-4.
+    v1/v2/v3/v4/v5/v6 are return-level rewards, so they should not be shrunk by 1e-4.
     """
     reward_key = str(reward_type).lower()
 
@@ -84,6 +84,13 @@ def get_reward_scaling(reward_type: str) -> float:
         "weight_future_reward",
         "portfolio_weighted_future_return",
         "portfolio_weighted_future_return_reward",
+        "v6",
+        "reward_v6",
+        "delta_weight_future",
+        "reward_delta_weight_future",
+        "delta_weight_future_reward",
+        "portfolio_weight_change_future_return",
+        "portfolio_weight_change_future_return_reward",
     }:
         return 1.0
 
@@ -115,11 +122,18 @@ REWARD_DISPLAY_NAMES = {
     "weight_future_reward": "portfolio_weighted_future_return_reward",
     "portfolio_weighted_future_return": "portfolio_weighted_future_return_reward",
     "portfolio_weighted_future_return_reward": "portfolio_weighted_future_return_reward",
+    "v6": "portfolio_weight_change_future_return_reward",
+    "reward_v6": "portfolio_weight_change_future_return_reward",
+    "delta_weight_future": "portfolio_weight_change_future_return_reward",
+    "reward_delta_weight_future": "portfolio_weight_change_future_return_reward",
+    "delta_weight_future_reward": "portfolio_weight_change_future_return_reward",
+    "portfolio_weight_change_future_return": "portfolio_weight_change_future_return_reward",
+    "portfolio_weight_change_future_return_reward": "portfolio_weight_change_future_return_reward",
 }
 
 
 def reward_display_name(reward_type: str | None) -> str:
-    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5."""
+    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5/v6."""
     key = str(reward_type or "").strip().lower()
     if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
         key = key[len("reward_"):]
@@ -377,7 +391,7 @@ def make_trade_env() -> StockTradingEnv:
 
 def predict_and_collect(model, agent_name: str):
     if model is None:
-        return None, None, None, None
+        return None, None, None, None, None
 
     env = make_trade_env()
 
@@ -399,10 +413,18 @@ def predict_and_collect(model, agent_name: str):
     account_value = test_env.env_method(method_name="save_asset_memory")[0]
     actions = test_env.env_method(method_name="save_action_memory")[0]
     holdings = test_env.env_method(method_name="save_holdings_memory")[0]
+    weights = test_env.env_method(method_name="save_weight_memory")[0]
     rewards = test_env.env_method(method_name="save_reward_memory")[0]
 
-    save_agent_diagnostics(agent_name, account_value, actions, holdings, rewards)
-    return account_value, actions, holdings, rewards
+    save_agent_diagnostics(
+        agent_name,
+        account_value,
+        actions,
+        holdings,
+        weights,
+        rewards,
+    )
+    return account_value, actions, holdings, weights, rewards
 
 
 def save_agent_diagnostics(
@@ -410,6 +432,7 @@ def save_agent_diagnostics(
     account_value: pd.DataFrame,
     actions: pd.DataFrame,
     holdings: pd.DataFrame,
+    weights: pd.DataFrame,
     rewards: pd.DataFrame,
 ) -> None:
     suffix = f"{agent_name}_{REWARD_TYPE}_{TRADE_START_DATE}_to_{TRADE_END_DATE}_{today_str}"
@@ -419,6 +442,9 @@ def save_agent_diagnostics(
 
     holdings_path = OUTPUT_DIR / f"holdings_{suffix}.csv"
     holdings.to_csv(holdings_path, index=False, encoding="utf-8-sig")
+
+    weights_path = OUTPUT_DIR / f"post_trade_weights_{suffix}.csv"
+    weights.to_csv(weights_path, index=False, encoding="utf-8-sig")
 
     # Backtest stage is for trade-period actions, holdings, and portfolio value.
     # Reward curve is saved in FinRL_StockTrading_2026_2_train.py, because
@@ -432,6 +458,7 @@ def save_agent_diagnostics(
             "source_role": "current_repeat_holdings_memory",
             "source_csv": str(holdings_path),
             "actions_csv": str(actions_path),
+            "weights_csv": str(weights_path),
             "train_data": str(TRAIN_DATA_PATH),
             "trade_data": str(TRADE_DATA_PATH),
             "trained_model_dir": str(TRAINED_MODEL_DIR),
@@ -453,6 +480,7 @@ def save_agent_diagnostics(
                 "source_role": "current_repeat_holdings_memory",
                 "source_csv": str(holdings_path),
                 "actions_csv": str(actions_path),
+                "weights_csv": str(weights_path),
                 "train_data": str(TRAIN_DATA_PATH),
                 "trade_data": str(TRADE_DATA_PATH),
                 "trained_model_dir": str(TRAINED_MODEL_DIR),
@@ -467,6 +495,7 @@ def save_agent_diagnostics(
 
     print(f"Actions saved to {actions_path}")
     print(f"Holdings saved to {holdings_path}")
+    print(f"Post-trade weights saved to {weights_path}")
     print("Backtest reward curve is intentionally not saved here; see train_reward_curve_* from the training script.")
 
 
@@ -622,12 +651,12 @@ def plot_reward_curve(rewards: pd.DataFrame, out_path: Path, agent_name: str) ->
 
 
 # Run predictions. Each agent gets a fresh environment to avoid memory contamination.
-df_account_value_a2c, df_actions_a2c, _, _ = predict_and_collect(trained_a2c, "a2c") if if_using_a2c else (None, None, None, None)
-df_account_value_ddpg, df_actions_ddpg, _, _ = predict_and_collect(trained_ddpg, "ddpg") if if_using_ddpg else (None, None, None, None)
-df_account_value_ppo, df_actions_ppo, df_holdings_ppo, df_rewards_ppo = predict_and_collect(trained_ppo, "ppo") if if_using_ppo else (None, None, None, None)
-df_account_value_reinforce, df_actions_reinforce, df_holdings_reinforce, df_rewards_reinforce = predict_and_collect(trained_reinforce, "reinforce") if if_using_reinforce else (None, None, None, None)
-df_account_value_td3, df_actions_td3, _, _ = predict_and_collect(trained_td3, "td3") if if_using_td3 else (None, None, None, None)
-df_account_value_sac, df_actions_sac, _, _ = predict_and_collect(trained_sac, "sac") if if_using_sac else (None, None, None, None)
+df_account_value_a2c, df_actions_a2c, _, _, _ = predict_and_collect(trained_a2c, "a2c") if if_using_a2c else (None, None, None, None, None)
+df_account_value_ddpg, df_actions_ddpg, _, _, _ = predict_and_collect(trained_ddpg, "ddpg") if if_using_ddpg else (None, None, None, None, None)
+df_account_value_ppo, df_actions_ppo, df_holdings_ppo, df_weights_ppo, df_rewards_ppo = predict_and_collect(trained_ppo, "ppo") if if_using_ppo else (None, None, None, None, None)
+df_account_value_reinforce, df_actions_reinforce, df_holdings_reinforce, df_weights_reinforce, df_rewards_reinforce = predict_and_collect(trained_reinforce, "reinforce") if if_using_reinforce else (None, None, None, None, None)
+df_account_value_td3, df_actions_td3, _, _, _ = predict_and_collect(trained_td3, "td3") if if_using_td3 else (None, None, None, None, None)
+df_account_value_sac, df_actions_sac, _, _, _ = predict_and_collect(trained_sac, "sac") if if_using_sac else (None, None, None, None, None)
 
 # %% Part 4. Baselines
 

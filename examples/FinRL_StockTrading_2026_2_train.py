@@ -47,7 +47,7 @@ def get_reward_scaling(reward_type: str) -> float:
     Choose reward_scaling by reward definition.
 
     v0 is a money-difference reward, so it keeps FinRL's original 1e-4.
-    v1/v2/v3/v4/v5 are return-level rewards, so they should not be shrunk by 1e-4.
+    v1/v2/v3/v4/v5/v6 are return-level rewards, so they should not be shrunk by 1e-4.
     """
     reward_key = str(reward_type).lower()
 
@@ -74,6 +74,13 @@ def get_reward_scaling(reward_type: str) -> float:
         "weight_future_reward",
         "portfolio_weighted_future_return",
         "portfolio_weighted_future_return_reward",
+        "v6",
+        "reward_v6",
+        "delta_weight_future",
+        "reward_delta_weight_future",
+        "delta_weight_future_reward",
+        "portfolio_weight_change_future_return",
+        "portfolio_weight_change_future_return_reward",
     }:
         return 1.0
 
@@ -105,11 +112,18 @@ REWARD_DISPLAY_NAMES = {
     "weight_future_reward": "portfolio_weighted_future_return_reward",
     "portfolio_weighted_future_return": "portfolio_weighted_future_return_reward",
     "portfolio_weighted_future_return_reward": "portfolio_weighted_future_return_reward",
+    "v6": "portfolio_weight_change_future_return_reward",
+    "reward_v6": "portfolio_weight_change_future_return_reward",
+    "delta_weight_future": "portfolio_weight_change_future_return_reward",
+    "reward_delta_weight_future": "portfolio_weight_change_future_return_reward",
+    "delta_weight_future_reward": "portfolio_weight_change_future_return_reward",
+    "portfolio_weight_change_future_return": "portfolio_weight_change_future_return_reward",
+    "portfolio_weight_change_future_return_reward": "portfolio_weight_change_future_return_reward",
 }
 
 
 def reward_display_name(reward_type: str | None) -> str:
-    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5."""
+    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5/v6."""
     key = str(reward_type or "").strip().lower()
     if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
         key = key[len("reward_"):]
@@ -142,6 +156,13 @@ def get_future_reward_train_skip_days(reward_type: str, reward_params: dict) -> 
         "weight_future_reward",
         "portfolio_weighted_future_return",
         "portfolio_weighted_future_return_reward",
+        "v6",
+        "reward_v6",
+        "delta_weight_future",
+        "reward_delta_weight_future",
+        "delta_weight_future_reward",
+        "portfolio_weight_change_future_return",
+        "portfolio_weight_change_future_return_reward",
     }
     if reward_key not in future_reward_keys:
         return 0
@@ -569,6 +590,7 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
             break
 
     rewards = vec_env.env_method(method_name="save_reward_memory")[0]
+    weights = vec_env.env_method(method_name="save_weight_memory")[0]
     rewards = rewards.copy()
     rewards.insert(0, "env_step", np.arange(1, len(rewards) + 1))
 
@@ -578,13 +600,21 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
     suffix = f"{agent_name}_{REWARD_TYPE}_{train_start_date}_to_{train_end_date}_{today_str}"
 
     reward_path = OUTPUT_DIR / f"train_eval_reward_by_step_{suffix}.csv"
+    weights_path = OUTPUT_DIR / f"train_eval_post_trade_weights_{suffix}.csv"
     plot_path = OUTPUT_DIR / f"train_eval_cumulative_reward_by_step_{suffix}.png"
     rewards.to_csv(reward_path, index=False, encoding="utf-8-sig")
+    weights.to_csv(weights_path, index=False, encoding="utf-8-sig")
     if agent_name.lower() == PRIMARY_AGENT_NAME:
         rewards.to_csv(OUTPUT_DIR / "train_eval_reward_curve.csv", index=False, encoding="utf-8-sig")
+        weights.to_csv(
+            OUTPUT_DIR / "train_eval_post_trade_weights.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
     plot_train_eval_reward_curve(rewards, plot_path, agent_name)
 
     print(f"Train evaluation reward by step saved to {reward_path}")
+    print(f"Train evaluation post-trade weights saved to {weights_path}")
     print(f"Train evaluation reward plot saved to {plot_path}")
 
 # %% Part 2. Build environment

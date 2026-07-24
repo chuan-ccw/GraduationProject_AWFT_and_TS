@@ -32,8 +32,9 @@ from finrl import config
 #   "v3" = sum(action * future n-day average simple return)
 #   "v4" = sum(effective delta action * future n-day average simple return)
 #   "v5" = sum(post-trade stock weight * future n-day average return)
+#   "v6" = sum(change in post-trade stock weight * future n-day average return)
 
-REWARD_TYPE = "v0"
+REWARD_TYPE = "v6"
 
 REWARD_PARAMS_BY_TYPE = {
     "v0": {},
@@ -56,6 +57,10 @@ REWARD_PARAMS_BY_TYPE = {
         "c": 0.05,
     },
     "v5": {
+        "n_future": 20,
+        "price_col": "close",
+    },
+    "v6": {
         "n_future": 20,
         "price_col": "close",
     },
@@ -86,11 +91,18 @@ REWARD_DISPLAY_NAMES = {
     "weight_future_reward": "portfolio_weighted_future_return_reward",
     "portfolio_weighted_future_return": "portfolio_weighted_future_return_reward",
     "portfolio_weighted_future_return_reward": "portfolio_weighted_future_return_reward",
+    "v6": "portfolio_weight_change_future_return_reward",
+    "reward_v6": "portfolio_weight_change_future_return_reward",
+    "delta_weight_future": "portfolio_weight_change_future_return_reward",
+    "reward_delta_weight_future": "portfolio_weight_change_future_return_reward",
+    "delta_weight_future_reward": "portfolio_weight_change_future_return_reward",
+    "portfolio_weight_change_future_return": "portfolio_weight_change_future_return_reward",
+    "portfolio_weight_change_future_return_reward": "portfolio_weight_change_future_return_reward",
 }
 
 
 def reward_display_name(reward_type: str | None) -> str:
-    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5."""
+    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5/v6."""
     key = str(reward_type or "").strip().lower()
     if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
         key = key[len("reward_"):]
@@ -302,7 +314,7 @@ RUN_BACKTEST = True
 
 # 是否在 rolling 實驗結束後自動使用「最新」v0 與目前 REWARD_TYPE 產生比較圖。
 # 例如 REWARD_TYPE="v2" 時，會產生 v0 vs v2；
-# REWARD_TYPE="v5" 時，會產生 v0 vs v5。
+# REWARD_TYPE="v5" 或 "v6" 時，也會自動比較對應版本。
 # 建議正式實驗設為 False，改用 examples/Compare_V0_V1_Manual.py 手動指定資料夾。
 AUTO_COMPARE_LATEST = False
 
@@ -1564,7 +1576,14 @@ def _run_continuous_window_agent(
     use_carried_state: bool,
     random_seed: int,
     predict_deterministic: bool,
-) -> tuple[pd.DataFrame, pd.DataFrame, float, dict[str, float], list[str]]:
+) -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    float,
+    dict[str, float],
+    list[str],
+]:
     """Run one test window using carried cash/holdings as the initial portfolio."""
     from stable_baselines3 import PPO
     from finrl.agents.policy_gradient import ReinforceAgent
@@ -1634,6 +1653,7 @@ def _run_continuous_window_agent(
 
     account_value = test_env.env_method(method_name="save_asset_memory")[0]
     holdings = test_env.env_method(method_name="save_holdings_memory")[0]
+    weights = test_env.env_method(method_name="save_weight_memory")[0]
 
     if holdings.empty:
         raise ValueError(f"{trade_data_path} 產生的 holdings 記錄是空的。")
@@ -1645,7 +1665,7 @@ def _run_continuous_window_agent(
         for tic in tic_order
         if tic in holdings.columns
     }
-    return account_value, holdings, next_cash, next_shares_by_tic, tic_order
+    return account_value, holdings, weights, next_cash, next_shares_by_tic, tic_order
 
 
 def normalize_reward_type_for_continuous(value: str | None) -> str:
@@ -1666,6 +1686,12 @@ def normalize_reward_type_for_continuous(value: str | None) -> str:
         "weight_future_reward": "v5",
         "portfolio_weighted_future_return": "v5",
         "portfolio_weighted_future_return_reward": "v5",
+        "reward_v6": "v6",
+        "delta_weight_future": "v6",
+        "reward_delta_weight_future": "v6",
+        "delta_weight_future_reward": "v6",
+        "portfolio_weight_change_future_return": "v6",
+        "portfolio_weight_change_future_return_reward": "v6",
     }
     return aliases.get(text, text)
 
@@ -1734,7 +1760,7 @@ def run_continuous_5y_test(
             window_seed = test_seed + int(window["window_id"]) * 1000
 
             try:
-                account_value, holdings, carried_cash, carried_shares_by_tic, tic_order = _run_continuous_window_agent(
+                account_value, holdings, weights, carried_cash, carried_shares_by_tic, tic_order = _run_continuous_window_agent(
                     trade_data_path=trade_data_path,
                     trained_model_dir=trained_model_dir,
                     carried_cash=carried_cash,
@@ -1783,6 +1809,8 @@ def run_continuous_5y_test(
 
             window_holdings_path = repeat_dir / f"holdings_window_{window['window_id']:02d}_{reward_type}.csv"
             holdings.to_csv(window_holdings_path, index=False, encoding="utf-8-sig")
+            window_weights_path = repeat_dir / f"post_trade_weights_window_{window['window_id']:02d}_{reward_type}.csv"
+            weights.to_csv(window_weights_path, index=False, encoding="utf-8-sig")
 
             strategy = pd.to_numeric(account_value["account_value"], errors="coerce").dropna()
             window_summary_rows.append(
@@ -1804,6 +1832,7 @@ def run_continuous_5y_test(
                     "trade_data": str(trade_data_path),
                     "trained_model_dir": str(trained_model_dir),
                     "holdings_csv": str(window_holdings_path),
+                    "weights_csv": str(window_weights_path),
                     "predict_deterministic": TEST_PREDICT_DETERMINISTIC,
                 }
             )
@@ -1819,6 +1848,7 @@ def run_continuous_5y_test(
                     "trade_data": str(trade_data_path),
                     "trained_model_dir": str(trained_model_dir),
                     "holdings_csv": str(window_holdings_path),
+                    "weights_csv": str(window_weights_path),
                     "ticker_order": ",".join(tic_order),
                     "predict_deterministic": TEST_PREDICT_DETERMINISTIC,
                 }

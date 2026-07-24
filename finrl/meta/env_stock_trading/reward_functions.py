@@ -19,6 +19,7 @@ class RewardContext:
     cost_before_trade: float
     current_day: int
     tic_list: list
+    previous_stock_weights_after_trade: np.ndarray | None = None
 
 
 def reward_v0(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float:
@@ -574,8 +575,100 @@ def reward_v5(
     return float(np.sum(stock_weights[valid] * future_avg_returns[valid]))
 
 
+def reward_v6(
+    ctx: RewardContext,
+    params: Dict[str, Any] | None = None,
+) -> float:
+    """Portfolio-weight-change future-return reward.
+
+    Formula:
+        R_t = sum_i delta_w(i,t) * future_avg_returns(i,t)
+
+        delta_w(i,t) = w(i,t) - w(i,t-1)
+
+        w(i,t) = market_value(i,t) / total_asset(t)
+
+        future_avg_returns(i,t)
+            = (avg_p(i,t)^n - p(i,t)) / p(i,t)
+
+        avg_p(i,t)^n = 1/n * sum_{k=t+1}^{t+n} p(i,k)
+
+    Both w(i,t) and w(i,t-1) are post-trade stock weights. At the first
+    step of an episode, w(i,t-1) is initialized from the starting portfolio
+    before the first trade. For the usual all-cash reset, those weights are 0.
+    """
+    params = params or {}
+
+    eps = float(params.get("eps", 1e-8))
+    n_future = int(params.get("n_future", 5))
+    price_col = params.get("price_col", "close")
+
+    price_matrix, day_to_pos = _get_price_matrix(ctx.env, ctx.tic_list, price_col)
+
+    current_pos = day_to_pos.get(ctx.current_day)
+    if current_pos is None:
+        return 0.0
+
+    start_pos = current_pos + 1
+    end_pos = current_pos + n_future + 1
+    if end_pos > price_matrix.shape[0]:
+        return 0.0
+
+    future_window = price_matrix[start_pos:end_pos]
+    current_prices = np.asarray(ctx.current_prices_before_trade, dtype=float)
+    current_weights = np.asarray(ctx.stock_weights_after_trade, dtype=float)
+
+    if ctx.previous_stock_weights_after_trade is None:
+        raise ValueError(
+            "previous_stock_weights_after_trade is required for reward v6."
+        )
+    previous_weights = np.asarray(
+        ctx.previous_stock_weights_after_trade,
+        dtype=float,
+    )
+
+    if current_weights.shape != current_prices.shape:
+        raise ValueError(
+            "stock_weights_after_trade and current_prices_before_trade must "
+            f"have the same shape, got {current_weights.shape} and "
+            f"{current_prices.shape}."
+        )
+    if previous_weights.shape != current_weights.shape:
+        raise ValueError(
+            "previous_stock_weights_after_trade and stock_weights_after_trade "
+            f"must have the same shape, got {previous_weights.shape} and "
+            f"{current_weights.shape}."
+        )
+
+    avg_future_prices = np.nanmean(future_window, axis=0)
+    future_avg_returns = (avg_future_prices - current_prices) / (
+        current_prices + eps
+    )
+    delta_weights = current_weights - previous_weights
+
+    valid = (
+        np.isfinite(current_prices)
+        & np.isfinite(avg_future_prices)
+        & np.isfinite(future_avg_returns)
+        & np.isfinite(current_weights)
+        & np.isfinite(previous_weights)
+        & np.isfinite(delta_weights)
+        & np.all(np.isfinite(future_window), axis=0)
+        & (current_prices > eps)
+        & (avg_future_prices > eps)
+    )
+
+    if not np.any(valid):
+        return 0.0
+
+    return float(np.sum(delta_weights[valid] * future_avg_returns[valid]))
+
+
 # Backward-compatible function name for code created before the v5 alias.
 reward_weight_future = reward_v5
+
+# Formal and compatibility function names for reward v6.
+reward_weight_change_future = reward_v6
 
 
 REWARD_FUNCTIONS = {
@@ -606,6 +699,14 @@ REWARD_FUNCTIONS = {
     "weight_future_reward": reward_v5,
     "portfolio_weighted_future_return": reward_v5,
     "portfolio_weighted_future_return_reward": reward_v5,
+
+    "v6": reward_v6,
+    "reward_v6": reward_v6,
+    "delta_weight_future": reward_v6,
+    "reward_delta_weight_future": reward_v6,
+    "delta_weight_future_reward": reward_v6,
+    "portfolio_weight_change_future_return": reward_v6,
+    "portfolio_weight_change_future_return_reward": reward_v6,
 }
 
 
