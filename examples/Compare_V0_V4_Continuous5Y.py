@@ -89,20 +89,26 @@ REWARD_DISPLAY_NAMES = {
     "reward_v4": "future_avg_delta_action_reward",
     "future_avg_delta_action_return": "future_avg_delta_action_reward",
     "future_avg_delta_action_reward": "future_avg_delta_action_reward",
-    "v5": "portfolio_weighted_future_return_reward",
-    "reward_v5": "portfolio_weighted_future_return_reward",
-    "weight_future": "portfolio_weighted_future_return_reward",
-    "reward_weight_future": "portfolio_weighted_future_return_reward",
-    "weight_future_reward": "portfolio_weighted_future_return_reward",
-    "portfolio_weighted_future_return": "portfolio_weighted_future_return_reward",
-    "portfolio_weighted_future_return_reward": "portfolio_weighted_future_return_reward",
-    "v6": "portfolio_weight_change_future_return_reward",
-    "reward_v6": "portfolio_weight_change_future_return_reward",
-    "delta_weight_future": "portfolio_weight_change_future_return_reward",
-    "reward_delta_weight_future": "portfolio_weight_change_future_return_reward",
-    "delta_weight_future_reward": "portfolio_weight_change_future_return_reward",
-    "portfolio_weight_change_future_return": "portfolio_weight_change_future_return_reward",
-    "portfolio_weight_change_future_return_reward": "portfolio_weight_change_future_return_reward",
+    "v5": "WFT",
+    "reward_v5": "WFT",
+    "weight_future": "WFT",
+    "reward_weight_future": "WFT",
+    "weight_future_reward": "WFT",
+    "portfolio_weighted_future_return": "WFT",
+    "portfolio_weighted_future_return_reward": "WFT",
+    "wft": "WFT",
+    "weighted_future_trend": "WFT",
+    "weighted_future_trend_reward": "WFT",
+    "v6": "DWFT",
+    "reward_v6": "DWFT",
+    "delta_weight_future": "DWFT",
+    "reward_delta_weight_future": "DWFT",
+    "delta_weight_future_reward": "DWFT",
+    "portfolio_weight_change_future_return": "DWFT",
+    "portfolio_weight_change_future_return_reward": "DWFT",
+    "dwft": "DWFT",
+    "delta_weighted_future_trend": "DWFT",
+    "delta_weighted_future_trend_reward": "DWFT",
 }
 
 
@@ -149,12 +155,18 @@ def normalize_reward_type(value: str | None) -> str:
         "weight_future_reward": "v5",
         "portfolio_weighted_future_return": "v5",
         "portfolio_weighted_future_return_reward": "v5",
+        "wft": "v5",
+        "weighted_future_trend": "v5",
+        "weighted_future_trend_reward": "v5",
         "reward_v6": "v6",
         "delta_weight_future": "v6",
         "reward_delta_weight_future": "v6",
         "delta_weight_future_reward": "v6",
         "portfolio_weight_change_future_return": "v6",
         "portfolio_weight_change_future_return_reward": "v6",
+        "dwft": "v6",
+        "delta_weighted_future_trend": "v6",
+        "delta_weighted_future_trend_reward": "v6",
     }
     return aliases.get(text, text)
 
@@ -475,7 +487,7 @@ def collect_compare_series(rolling_root: Path, reward_type: str, compare_data_mo
     mode = str(compare_data_mode or "annual_reset").strip().lower()
     if mode in {"continuous", "continuous_5y", "continuous5y"}:
         return collect_continuous_5y_series(rolling_root, reward_type)
-    if mode in {"repeat", "annual_reset"}:
+    if mode in {"times", "annual_reset"}:
         return collect_annual_reset_series(rolling_root, reward_type)
     raise ValueError('COMPARE_DATA_MODE 只能是 "annual_reset" 或 "continuous_5y"。')
 

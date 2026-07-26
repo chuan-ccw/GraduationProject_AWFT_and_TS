@@ -507,7 +507,7 @@ def reward_v5(
     ctx: RewardContext,
     params: Dict[str, Any] | None = None,
 ) -> float:
-    """Portfolio-weighted future-return reward.
+    """Weighted-Future-Trend (WFT).
 
     The stock weights are calculated immediately after the agent's trades have
     been executed, using the current-day prices and the actual resulting share
@@ -579,10 +579,10 @@ def reward_v6(
     ctx: RewardContext,
     params: Dict[str, Any] | None = None,
 ) -> float:
-    """Portfolio-weight-change future-return reward.
+    """Delta-Weighted-Future-Trend (DWFT).
 
     Formula:
-        R_t = sum_i delta_w(i,t) * future_avg_returns(i,t)
+        R_t = sum_i delta_w(i,t) * future_signal(i,t)
 
         delta_w(i,t) = w(i,t) - w(i,t-1)
 
@@ -593,6 +593,17 @@ def reward_v6(
 
         avg_p(i,t)^n = 1/n * sum_{k=t+1}^{t+n} p(i,k)
 
+        future_direction(i,t)
+            = direction(i,t) * (P_max(i,t) - P_min(i,t)) / p(i,t)
+
+        direction(i,t) = +1, if P_min occurs before P_max
+                         -1, if P_min occurs after P_max
+                          0, if both occur at the same position
+
+    ``future_variable`` selects the future signal used by DWFT:
+        "future_direction"  -> delta_w * future_direction
+        "future_avg_return" -> delta_w * future_avg_returns
+
     Both w(i,t) and w(i,t-1) are post-trade stock weights. At the first
     step of an episode, w(i,t-1) is initialized from the starting portfolio
     before the first trade. For the usual all-cash reset, those weights are 0.
@@ -602,6 +613,24 @@ def reward_v6(
     eps = float(params.get("eps", 1e-8))
     n_future = int(params.get("n_future", 5))
     price_col = params.get("price_col", "close")
+    future_variable = str(
+        params.get("future_variable", "future_direction")
+    ).strip().lower()
+
+    future_variable_aliases = {
+        "future_direction": "future_direction",
+        "direction": "future_direction",
+        "future_avg_return": "future_avg_return",
+        "future_average": "future_avg_return",
+        "future_avg_returns": "future_avg_return",
+    }
+    if future_variable not in future_variable_aliases:
+        available = ", ".join(sorted(future_variable_aliases))
+        raise ValueError(
+            "reward_v6 parameter 'future_variable' must be one of: "
+            f"{available}. Got {future_variable!r}."
+        )
+    future_variable = future_variable_aliases[future_variable]
 
     price_matrix, day_to_pos = _get_price_matrix(ctx.env, ctx.tic_list, price_col)
 
@@ -644,12 +673,35 @@ def reward_v6(
     future_avg_returns = (avg_future_prices - current_prices) / (
         current_prices + eps
     )
+
+    future_max_prices = np.nanmax(future_window, axis=0)
+    future_min_prices = np.nanmin(future_window, axis=0)
+    future_max_positions = np.argmax(future_window, axis=0)
+    future_min_positions = np.argmin(future_window, axis=0)
+    future_direction_signs = np.sign(
+        future_max_positions - future_min_positions
+    ).astype(float)
+    future_direction = (
+        future_direction_signs
+        * (future_max_prices - future_min_prices)
+        / (current_prices + eps)
+    )
+
+    future_signal = (
+        future_direction
+        if future_variable == "future_direction"
+        else future_avg_returns
+    )
     delta_weights = current_weights - previous_weights
 
     valid = (
         np.isfinite(current_prices)
         & np.isfinite(avg_future_prices)
         & np.isfinite(future_avg_returns)
+        & np.isfinite(future_max_prices)
+        & np.isfinite(future_min_prices)
+        & np.isfinite(future_direction)
+        & np.isfinite(future_signal)
         & np.isfinite(current_weights)
         & np.isfinite(previous_weights)
         & np.isfinite(delta_weights)
@@ -661,7 +713,7 @@ def reward_v6(
     if not np.any(valid):
         return 0.0
 
-    return float(np.sum(delta_weights[valid] * future_avg_returns[valid]))
+    return float(np.sum(delta_weights[valid] * future_signal[valid]))
 
 
 # Backward-compatible function name for code created before the v5 alias.
@@ -699,6 +751,9 @@ REWARD_FUNCTIONS = {
     "weight_future_reward": reward_v5,
     "portfolio_weighted_future_return": reward_v5,
     "portfolio_weighted_future_return_reward": reward_v5,
+    "wft": reward_v5,
+    "weighted_future_trend": reward_v5,
+    "weighted_future_trend_reward": reward_v5,
 
     "v6": reward_v6,
     "reward_v6": reward_v6,
@@ -707,6 +762,9 @@ REWARD_FUNCTIONS = {
     "delta_weight_future_reward": reward_v6,
     "portfolio_weight_change_future_return": reward_v6,
     "portfolio_weight_change_future_return_reward": reward_v6,
+    "dwft": reward_v6,
+    "delta_weighted_future_trend": reward_v6,
+    "delta_weighted_future_trend_reward": reward_v6,
 }
 
 

@@ -46,6 +46,19 @@ def _make_price_df() -> pd.DataFrame:
     return pd.DataFrame(rows).set_index("day")
 
 
+def _make_direction_price_df() -> pd.DataFrame:
+    rows = []
+    prices = {
+        0: {"AAA": 10.0, "BBB": 20.0},
+        1: {"AAA": 8.0, "BBB": 24.0},
+        2: {"AAA": 12.0, "BBB": 16.0},
+    }
+    for day, day_prices in prices.items():
+        for tic, close in day_prices.items():
+            rows.append({"day": day, "tic": tic, "close": close})
+    return pd.DataFrame(rows).set_index("day")
+
+
 def test_calculate_stock_weights_after_trade_includes_cash() -> None:
     weights = calculate_stock_weights_after_trade(
         stock_prices=np.array([10.0, 20.0]),
@@ -98,7 +111,7 @@ def test_v5_and_formal_name_dispatch_to_same_reward() -> None:
 
     reward_by_v5 = calculate_reward("v5", ctx, params)
     reward_by_formal_name = calculate_reward(
-        "portfolio_weighted_future_return_reward",
+        "weighted_future_trend",
         ctx,
         params,
     )
@@ -125,7 +138,11 @@ def test_reward_v6_uses_change_in_post_trade_weights() -> None:
 
     reward = reward_v6(
         ctx,
-        {"n_future": 2, "price_col": "close"},
+        {
+            "n_future": 2,
+            "price_col": "close",
+            "future_variable": "future_avg_return",
+        },
     )
 
     # delta_w = [+0.15, -0.15].
@@ -150,12 +167,71 @@ def test_v6_and_formal_name_dispatch_to_same_reward() -> None:
     )
     params = {"n_future": 2, "price_col": "close"}
 
+    params["future_variable"] = "future_avg_return"
+
     reward_by_v6 = calculate_reward("v6", ctx, params)
     reward_by_formal_name = calculate_reward(
-        "portfolio_weight_change_future_return_reward",
+        "delta_weighted_future_trend",
         ctx,
         params,
     )
 
     assert np.isclose(reward_by_v6, 0.03)
     assert np.isclose(reward_by_formal_name, reward_by_v6)
+
+
+def test_reward_v6_uses_future_direction_by_default() -> None:
+    env = SimpleNamespace(df=_make_direction_price_df())
+    ctx = RewardContext(
+        env=env,
+        begin_total_asset=800.0,
+        end_total_asset=800.0,
+        raw_actions=np.array([100.0, -100.0]),
+        current_prices_before_trade=np.array([10.0, 20.0]),
+        stock_weights_after_trade=np.array([0.40, 0.10]),
+        previous_stock_weights_after_trade=np.array([0.25, 0.25]),
+        cost_before_trade=0.0,
+        current_day=0,
+        tic_list=["AAA", "BBB"],
+    )
+
+    reward = reward_v6(
+        ctx,
+        {"n_future": 2, "price_col": "close"},
+    )
+
+    # delta_w = [+0.15, -0.15].
+    # AAA: min 8 occurs before max 12 -> +(12 - 8) / 10 = +0.4.
+    # BBB: min 16 occurs after max 24 -> -(24 - 16) / 20 = -0.4.
+    # reward = 0.15 * 0.4 + (-0.15) * (-0.4) = 0.12.
+    assert np.isclose(reward, 0.12)
+
+
+def test_reward_v6_rejects_unknown_future_variable() -> None:
+    env = SimpleNamespace(df=_make_price_df())
+    ctx = RewardContext(
+        env=env,
+        begin_total_asset=800.0,
+        end_total_asset=800.0,
+        raw_actions=np.array([100.0, -100.0]),
+        current_prices_before_trade=np.array([10.0, 20.0]),
+        stock_weights_after_trade=np.array([0.40, 0.10]),
+        previous_stock_weights_after_trade=np.array([0.25, 0.25]),
+        cost_before_trade=0.0,
+        current_day=0,
+        tic_list=["AAA", "BBB"],
+    )
+
+    try:
+        reward_v6(
+            ctx,
+            {
+                "n_future": 2,
+                "price_col": "close",
+                "future_variable": "unknown",
+            },
+        )
+    except ValueError as exc:
+        assert "future_variable" in str(exc)
+    else:
+        raise AssertionError("reward_v6 should reject an unknown future_variable")

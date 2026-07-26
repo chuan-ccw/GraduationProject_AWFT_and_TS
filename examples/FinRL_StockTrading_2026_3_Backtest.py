@@ -42,13 +42,13 @@ EXPERIMENT_DIR = env_str("EXPERIMENT_DIR", None)
 TRAIN_DATA_PATH = Path(env_str("TRAIN_DATA_PATH", "train_data.csv"))
 TRADE_DATA_PATH = Path(env_str("TRADE_DATA_PATH", "trade_data.csv"))
 WINDOW_ID = env_str("WINDOW_ID", "")
-REPEAT_INDEX = env_str("REPEAT_INDEX", "")
+TIMES_INDEX = env_str("TIMES_INDEX", "")
 RANDOM_SEED = env_int("RANDOM_SEED", 0)
 PREDICT_DETERMINISTIC = env_bool("PREDICT_DETERMINISTIC", False)
 PRIMARY_AGENT_NAME = env_str("PRIMARY_AGENT_NAME", "ppo").strip().lower()
 
-# Backtest uses stochastic PPO actions by default so repeated tests of the same model
-# can measure policy-sampling variation. RANDOM_SEED keeps each repeat reproducible.
+# Backtest uses stochastic PPO actions by default so multiple tests of the same model
+# can measure policy-sampling variation. RANDOM_SEED keeps each run reproducible.
 set_random_seed(RANDOM_SEED)
 
 
@@ -84,6 +84,9 @@ def get_reward_scaling(reward_type: str) -> float:
         "weight_future_reward",
         "portfolio_weighted_future_return",
         "portfolio_weighted_future_return_reward",
+        "wft",
+        "weighted_future_trend",
+        "weighted_future_trend_reward",
         "v6",
         "reward_v6",
         "delta_weight_future",
@@ -91,6 +94,9 @@ def get_reward_scaling(reward_type: str) -> float:
         "delta_weight_future_reward",
         "portfolio_weight_change_future_return",
         "portfolio_weight_change_future_return_reward",
+        "dwft",
+        "delta_weighted_future_trend",
+        "delta_weighted_future_trend_reward",
     }:
         return 1.0
 
@@ -115,20 +121,26 @@ REWARD_DISPLAY_NAMES = {
     "reward_v4": "future_avg_delta_action_reward",
     "future_avg_delta_action_return": "future_avg_delta_action_reward",
     "future_avg_delta_action_reward": "future_avg_delta_action_reward",
-    "v5": "portfolio_weighted_future_return_reward",
-    "reward_v5": "portfolio_weighted_future_return_reward",
-    "weight_future": "portfolio_weighted_future_return_reward",
-    "reward_weight_future": "portfolio_weighted_future_return_reward",
-    "weight_future_reward": "portfolio_weighted_future_return_reward",
-    "portfolio_weighted_future_return": "portfolio_weighted_future_return_reward",
-    "portfolio_weighted_future_return_reward": "portfolio_weighted_future_return_reward",
-    "v6": "portfolio_weight_change_future_return_reward",
-    "reward_v6": "portfolio_weight_change_future_return_reward",
-    "delta_weight_future": "portfolio_weight_change_future_return_reward",
-    "reward_delta_weight_future": "portfolio_weight_change_future_return_reward",
-    "delta_weight_future_reward": "portfolio_weight_change_future_return_reward",
-    "portfolio_weight_change_future_return": "portfolio_weight_change_future_return_reward",
-    "portfolio_weight_change_future_return_reward": "portfolio_weight_change_future_return_reward",
+    "v5": "WFT",
+    "reward_v5": "WFT",
+    "weight_future": "WFT",
+    "reward_weight_future": "WFT",
+    "weight_future_reward": "WFT",
+    "portfolio_weighted_future_return": "WFT",
+    "portfolio_weighted_future_return_reward": "WFT",
+    "wft": "WFT",
+    "weighted_future_trend": "WFT",
+    "weighted_future_trend_reward": "WFT",
+    "v6": "DWFT",
+    "reward_v6": "DWFT",
+    "delta_weight_future": "DWFT",
+    "reward_delta_weight_future": "DWFT",
+    "delta_weight_future_reward": "DWFT",
+    "portfolio_weight_change_future_return": "DWFT",
+    "portfolio_weight_change_future_return_reward": "DWFT",
+    "dwft": "DWFT",
+    "delta_weighted_future_trend": "DWFT",
+    "delta_weighted_future_trend_reward": "DWFT",
 }
 
 
@@ -184,7 +196,7 @@ save_config(
         "train_data_path": str(TRAIN_DATA_PATH),
         "trade_data_path": str(TRADE_DATA_PATH),
         "window_id": WINDOW_ID,
-        "repeat_index": REPEAT_INDEX,
+        "times_index": TIMES_INDEX,
         "random_seed": RANDOM_SEED,
         "predict_deterministic": PREDICT_DETERMINISTIC,
     },
@@ -455,17 +467,17 @@ def save_agent_diagnostics(
         {
             "image": holdings_heatmap_path.name,
             "image_path": str(holdings_heatmap_path),
-            "source_role": "current_repeat_holdings_memory",
+            "source_role": "current_times_holdings_memory",
             "source_csv": str(holdings_path),
             "actions_csv": str(actions_path),
             "weights_csv": str(weights_path),
             "train_data": str(TRAIN_DATA_PATH),
             "trade_data": str(TRADE_DATA_PATH),
             "trained_model_dir": str(TRAINED_MODEL_DIR),
-            "stage": "backtest_repeat",
+            "stage": "backtest_times",
             "reward_type": REWARD_TYPE,
             "window_id": WINDOW_ID,
-            "repeat_index": REPEAT_INDEX,
+            "times_index": TIMES_INDEX,
             "random_seed": RANDOM_SEED,
             "predict_deterministic": PREDICT_DETERMINISTIC,
         }
@@ -477,17 +489,17 @@ def save_agent_diagnostics(
             {
                 "image": canonical_heatmap_path.name,
                 "image_path": str(canonical_heatmap_path),
-                "source_role": "current_repeat_holdings_memory",
+                "source_role": "current_times_holdings_memory",
                 "source_csv": str(holdings_path),
                 "actions_csv": str(actions_path),
                 "weights_csv": str(weights_path),
                 "train_data": str(TRAIN_DATA_PATH),
                 "trade_data": str(TRADE_DATA_PATH),
                 "trained_model_dir": str(TRAINED_MODEL_DIR),
-                "stage": "backtest_repeat",
+                "stage": "backtest_times",
                 "reward_type": REWARD_TYPE,
                 "window_id": WINDOW_ID,
-                "repeat_index": REPEAT_INDEX,
+                "times_index": TIMES_INDEX,
                 "random_seed": RANDOM_SEED,
             }
         )
@@ -715,15 +727,15 @@ save_image_source_manifest(
         {
             "image": plot_path.name,
             "image_path": str(plot_path),
-            "source_role": "current_repeat_backtest_result",
+            "source_role": "current_times_backtest_result",
             "source_csv": str(backtest_csv_path),
             "train_data": str(TRAIN_DATA_PATH),
             "trade_data": str(TRADE_DATA_PATH),
             "trained_model_dir": str(TRAINED_MODEL_DIR),
-            "stage": "backtest_repeat",
+            "stage": "backtest_times",
             "reward_type": REWARD_TYPE,
             "window_id": WINDOW_ID,
-            "repeat_index": REPEAT_INDEX,
+            "times_index": TIMES_INDEX,
             "random_seed": RANDOM_SEED,
             "predict_deterministic": PREDICT_DETERMINISTIC,
         }
@@ -739,7 +751,7 @@ summary = {
     "trade_start_date": TRADE_START_DATE,
     "trade_end_date": TRADE_END_DATE,
     "window_id": WINDOW_ID,
-    "repeat_index": REPEAT_INDEX,
+    "times_index": TIMES_INDEX,
     "random_seed": RANDOM_SEED,
     "predict_deterministic": PREDICT_DETERMINISTIC,
 }

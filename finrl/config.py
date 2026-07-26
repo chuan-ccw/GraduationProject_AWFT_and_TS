@@ -11,8 +11,10 @@ RESULTS_DIR = "results"
 # For reward v2: use REWARD_TYPE = "v2"
 # For reward v3: use REWARD_TYPE = "v3"
 # For reward v4: use REWARD_TYPE = "v4"
-# For reward v5 (portfolio-weighted future return): use REWARD_TYPE = "v5"
-# For reward v6 (portfolio-weight-change future return): use REWARD_TYPE = "v6"
+# For reward v5 (Weighted-Future-Trend, WFT): use REWARD_TYPE = "v5"
+# For reward v6 (Delta-Weighted-Future-Trend, DWFT): use REWARD_TYPE = "v6"
+# For v6, set REWARD_PARAMS["future_variable"] to "future_direction"
+# or "future_avg_return".
 REWARD_TYPE = "v5"
 REWARD_PARAMS = {"n_future": 5, "price_col": "close", "c": 0.05}
 EXPERIMENT_ROOT = r"C:\Users\User\Desktop\GraduationProject\Experence_result"

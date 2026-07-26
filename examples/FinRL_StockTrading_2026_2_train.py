@@ -74,6 +74,9 @@ def get_reward_scaling(reward_type: str) -> float:
         "weight_future_reward",
         "portfolio_weighted_future_return",
         "portfolio_weighted_future_return_reward",
+        "wft",
+        "weighted_future_trend",
+        "weighted_future_trend_reward",
         "v6",
         "reward_v6",
         "delta_weight_future",
@@ -81,6 +84,9 @@ def get_reward_scaling(reward_type: str) -> float:
         "delta_weight_future_reward",
         "portfolio_weight_change_future_return",
         "portfolio_weight_change_future_return_reward",
+        "dwft",
+        "delta_weighted_future_trend",
+        "delta_weighted_future_trend_reward",
     }:
         return 1.0
 
@@ -105,20 +111,26 @@ REWARD_DISPLAY_NAMES = {
     "reward_v4": "future_avg_delta_action_reward",
     "future_avg_delta_action_return": "future_avg_delta_action_reward",
     "future_avg_delta_action_reward": "future_avg_delta_action_reward",
-    "v5": "portfolio_weighted_future_return_reward",
-    "reward_v5": "portfolio_weighted_future_return_reward",
-    "weight_future": "portfolio_weighted_future_return_reward",
-    "reward_weight_future": "portfolio_weighted_future_return_reward",
-    "weight_future_reward": "portfolio_weighted_future_return_reward",
-    "portfolio_weighted_future_return": "portfolio_weighted_future_return_reward",
-    "portfolio_weighted_future_return_reward": "portfolio_weighted_future_return_reward",
-    "v6": "portfolio_weight_change_future_return_reward",
-    "reward_v6": "portfolio_weight_change_future_return_reward",
-    "delta_weight_future": "portfolio_weight_change_future_return_reward",
-    "reward_delta_weight_future": "portfolio_weight_change_future_return_reward",
-    "delta_weight_future_reward": "portfolio_weight_change_future_return_reward",
-    "portfolio_weight_change_future_return": "portfolio_weight_change_future_return_reward",
-    "portfolio_weight_change_future_return_reward": "portfolio_weight_change_future_return_reward",
+    "v5": "WFT",
+    "reward_v5": "WFT",
+    "weight_future": "WFT",
+    "reward_weight_future": "WFT",
+    "weight_future_reward": "WFT",
+    "portfolio_weighted_future_return": "WFT",
+    "portfolio_weighted_future_return_reward": "WFT",
+    "wft": "WFT",
+    "weighted_future_trend": "WFT",
+    "weighted_future_trend_reward": "WFT",
+    "v6": "DWFT",
+    "reward_v6": "DWFT",
+    "delta_weight_future": "DWFT",
+    "reward_delta_weight_future": "DWFT",
+    "delta_weight_future_reward": "DWFT",
+    "portfolio_weight_change_future_return": "DWFT",
+    "portfolio_weight_change_future_return_reward": "DWFT",
+    "dwft": "DWFT",
+    "delta_weighted_future_trend": "DWFT",
+    "delta_weighted_future_trend_reward": "DWFT",
 }
 
 
@@ -156,6 +168,9 @@ def get_future_reward_train_skip_days(reward_type: str, reward_params: dict) -> 
         "weight_future_reward",
         "portfolio_weighted_future_return",
         "portfolio_weighted_future_return_reward",
+        "wft",
+        "weighted_future_trend",
+        "weighted_future_trend_reward",
         "v6",
         "reward_v6",
         "delta_weight_future",
@@ -163,6 +178,9 @@ def get_future_reward_train_skip_days(reward_type: str, reward_params: dict) -> 
         "delta_weight_future_reward",
         "portfolio_weight_change_future_return",
         "portfolio_weight_change_future_return_reward",
+        "dwft",
+        "delta_weighted_future_trend",
+        "delta_weighted_future_trend_reward",
     }
     if reward_key not in future_reward_keys:
         return 0
@@ -354,7 +372,7 @@ def save_sb3_training_reward_curve(agent_name: str) -> None:
             "source_role": "reinforce_training_progress" if is_reinforce else "sb3_training_progress",
             "source_csv": str(progress_path),
             "output_csv": str(csv_path),
-            "stage": "train_repeat",
+            "stage": "train_times",
             "reward_type": REWARD_TYPE,
             "random_seed": RANDOM_SEED,
             "training_data": str(TRAIN_DATA_PATH),
@@ -370,7 +388,7 @@ def save_sb3_training_reward_curve(agent_name: str) -> None:
                 "source_role": "reinforce_training_progress" if is_reinforce else "sb3_training_progress",
                 "source_csv": str(progress_path),
                 "output_csv": str(csv_path),
-                "stage": "train_repeat",
+                "stage": "train_times",
                 "reward_type": REWARD_TYPE,
                 "random_seed": RANDOM_SEED,
                 "training_data": str(TRAIN_DATA_PATH),
@@ -385,7 +403,7 @@ def save_sb3_training_reward_curve(agent_name: str) -> None:
 
 
 def save_reinforce_diagnostics() -> None:
-    """Copy REINFORCE training and reward-v4 diagnostics to the repeat folder."""
+    """Copy REINFORCE training and reward-v4 diagnostics to the times folder."""
     progress_path = Path(RESULTS_DIR) / "reinforce" / "progress.csv"
     if not progress_path.exists():
         print(f"No REINFORCE progress.csv found: {progress_path}")
@@ -492,7 +510,7 @@ def save_reinforce_deterministic_evaluation_curve() -> None:
                 "source_role": "reinforce_periodic_deterministic_evaluation",
                 "source_csv": str(progress_path),
                 "output_csv": str(csv_path),
-                "stage": "train_repeat_diagnostic_eval",
+                "stage": "train_times_diagnostic_eval",
                 "reward_type": REWARD_TYPE,
                 "random_seed": RANDOM_SEED,
                 "training_data": str(TRAIN_DATA_PATH),
@@ -504,7 +522,7 @@ def save_reinforce_deterministic_evaluation_curve() -> None:
                 "source_role": "reinforce_periodic_deterministic_evaluation",
                 "source_csv": str(progress_path),
                 "output_csv": str(canonical_csv_path),
-                "stage": "train_repeat_diagnostic_eval",
+                "stage": "train_times_diagnostic_eval",
                 "reward_type": REWARD_TYPE,
                 "random_seed": RANDOM_SEED,
                 "training_data": str(TRAIN_DATA_PATH),
@@ -553,7 +571,7 @@ def plot_train_eval_reward_curve(rewards, plot_path, agent_name):
                 "image_path": str(plot_path),
                 "source_role": "train_environment_evaluation_rewards",
                 "source_csv": str(csv_path),
-                "stage": "train_repeat_eval",
+                "stage": "train_times_eval",
                 "reward_type": REWARD_TYPE,
                 "random_seed": RANDOM_SEED,
                 "training_data": str(TRAIN_DATA_PATH),
