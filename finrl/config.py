@@ -14,7 +14,8 @@ RESULTS_DIR = "results"
 # For reward v5 (Weighted-Future-Trend, WFT): use REWARD_TYPE = "v5"
 # For reward v6 (Delta-Weighted-Future-Trend, DWFT): use REWARD_TYPE = "v6"
 # For v6, set REWARD_PARAMS["future_variable"] to "future_direction"
-# or "future_avg_return".
+# or "future_avg_return". Set REWARD_PARAMS["delta_weight_variable"] to
+# "original_delta_weight" or "same_price_delta_weight".
 REWARD_TYPE = "v5"
 REWARD_PARAMS = {"n_future": 5, "price_col": "close", "c": 0.05}
 EXPERIMENT_ROOT = r"C:\Users\User\Desktop\GraduationProject\Experence_result"

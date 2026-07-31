@@ -376,9 +376,21 @@ class StockTradingEnv(gym.Env):
             # 記錄交易發生的當下是第幾天
             current_day = self.day
 
-            # Reward v6 compares today's post-trade weights with the previous
-            # trading day's post-trade weights. At reset, this stores the
-            # starting portfolio weights before the first action.
+            # Calculate the pre-trade weights using today's prices. Reward v6
+            # can compare these weights with today's post-trade weights so both
+            # sides use the same P(i,t).
+            stock_holdings_before_trade = np.asarray(
+                self.state[(self.stock_dim + 1) : (self.stock_dim * 2 + 1)],
+                dtype=float,
+            )
+            stock_weights_before_trade = calculate_stock_weights_after_trade(
+                stock_prices=current_prices_before_trade,
+                stock_holdings=stock_holdings_before_trade,
+                cash_after_trade=float(self.state[0]),
+            )
+
+            # Original reward v6 method: compare today's post-trade weights
+            # with the previous trading day's post-trade weights.
             previous_stock_weights_after_trade = np.asarray(
                 self.previous_stock_weights_after_trade,
                 dtype=float,
@@ -468,6 +480,7 @@ class StockTradingEnv(gym.Env):
                 previous_stock_weights_after_trade=(
                     previous_stock_weights_after_trade
                 ),
+                stock_weights_before_trade=stock_weights_before_trade,
             )
 
             self.reward = calculate_reward(

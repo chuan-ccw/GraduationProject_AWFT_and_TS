@@ -36,6 +36,13 @@ from finrl import config
 
 REWARD_TYPE = "v6"
 
+# reward v6 delta-weight variable switch:
+#   "original_delta_weight"   = today's post-trade weight minus the previous
+#                               trading day's post-trade weight
+#   "same_price_delta_weight" = today's post-trade weight minus today's
+#                               pre-trade weight; both use today's price
+V6_DELTA_WEIGHT_VARIABLE = "same_price_delta_weight"
+
 # reward v6 future variable switch:
 #   "future_direction"  = delta_w * signed future high-low range
 #   "future_avg_return" = delta_w * future n-day average return
@@ -66,9 +73,10 @@ REWARD_PARAMS_BY_TYPE = {
         "price_col": "close",
     },
     "v6": {
-        "n_future": 60,
+        "n_future": 20,
         "price_col": "close",
         "future_variable": V6_FUTURE_VARIABLE,
+        "delta_weight_variable": V6_DELTA_WEIGHT_VARIABLE,
     },
 }
 

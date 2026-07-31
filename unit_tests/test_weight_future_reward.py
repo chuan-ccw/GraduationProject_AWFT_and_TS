@@ -151,6 +151,40 @@ def test_reward_v6_uses_change_in_post_trade_weights() -> None:
     assert np.isclose(reward, 0.03)
 
 
+def test_reward_v6_uses_same_price_delta_weight() -> None:
+    env = SimpleNamespace(df=_make_price_df())
+    ctx = RewardContext(
+        env=env,
+        begin_total_asset=800.0,
+        end_total_asset=800.0,
+        raw_actions=np.array([100.0, -100.0]),
+        current_prices_before_trade=np.array([10.0, 20.0]),
+        stock_weights_after_trade=np.array([0.40, 0.10]),
+        previous_stock_weights_after_trade=np.array([0.10, 0.40]),
+        stock_weights_before_trade=np.array([0.25, 0.25]),
+        cost_before_trade=0.0,
+        current_day=0,
+        tic_list=["AAA", "BBB"],
+    )
+
+    reward = reward_v6(
+        ctx,
+        {
+            "n_future": 2,
+            "price_col": "close",
+            "future_variable": "future_avg_return",
+            "delta_weight_variable": "same_price_delta_weight",
+        },
+    )
+
+    # same_price_delta_weight = post-trade weight - pre-trade weight
+    #                         = [+0.15, -0.15].
+    # The previous day's weights are intentionally different and must not be used.
+    # AAA future return = +20%; BBB future return = 0%.
+    # reward = 0.15 * 0.20 + (-0.15) * 0.00 = 0.03.
+    assert np.isclose(reward, 0.03)
+
+
 def test_v6_and_formal_name_dispatch_to_same_reward() -> None:
     env = SimpleNamespace(df=_make_price_df())
     ctx = RewardContext(
@@ -235,3 +269,37 @@ def test_reward_v6_rejects_unknown_future_variable() -> None:
         assert "future_variable" in str(exc)
     else:
         raise AssertionError("reward_v6 should reject an unknown future_variable")
+
+
+def test_reward_v6_rejects_unknown_delta_weight_variable() -> None:
+    env = SimpleNamespace(df=_make_price_df())
+    ctx = RewardContext(
+        env=env,
+        begin_total_asset=800.0,
+        end_total_asset=800.0,
+        raw_actions=np.array([100.0, -100.0]),
+        current_prices_before_trade=np.array([10.0, 20.0]),
+        stock_weights_after_trade=np.array([0.40, 0.10]),
+        previous_stock_weights_after_trade=np.array([0.25, 0.25]),
+        stock_weights_before_trade=np.array([0.25, 0.25]),
+        cost_before_trade=0.0,
+        current_day=0,
+        tic_list=["AAA", "BBB"],
+    )
+
+    try:
+        reward_v6(
+            ctx,
+            {
+                "n_future": 2,
+                "price_col": "close",
+                "delta_weight_variable": "unknown",
+            },
+        )
+    except ValueError as exc:
+        assert "delta_weight_variable" in str(exc)
+    else:
+        raise AssertionError(
+            "reward_v6 should reject an unknown delta_weight_variable"
+        )
+
