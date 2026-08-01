@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from finrl import config
+from result_manager import append_compare_experiment_record, append_reward_experiment_record
 
 
 # =====================================================
@@ -41,12 +42,12 @@ REWARD_TYPE = "v6"
 #                               trading day's post-trade weight
 #   "same_price_delta_weight" = today's post-trade weight minus today's
 #                               pre-trade weight; both use today's price
-V6_DELTA_WEIGHT_VARIABLE = "same_price_delta_weight"
+V6_DELTA_WEIGHT_VARIABLE = "original_delta_weight"
 
 # reward v6 future variable switch:
 #   "future_direction"  = delta_w * signed future high-low range
 #   "future_avg_return" = delta_w * future n-day average return
-V6_FUTURE_VARIABLE = "future_direction"
+V6_FUTURE_VARIABLE = "future_avg_return"
 
 REWARD_PARAMS_BY_TYPE = {
     "v0": {},
@@ -1540,7 +1541,16 @@ def compare_latest_v0_target(target_reward_type: str) -> None:
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     save_json(compare_dir / "compare_config.json", config_payload)
+    history_csv = append_compare_experiment_record(
+        EXPERIMENT_ROOT,
+        compare_dir,
+        root_v0,
+        root_target,
+        compare_type="equity_curve_annual_reset",
+        extra={"target_reward_type": target_reward_type},
+    )
     print(f"compare_v0_{target_reward_type} saved to: {compare_dir}")
+    print(f"Compare experiment history updated: {history_csv}")
 
 
 # =====================================================
@@ -2178,7 +2188,16 @@ def compare_latest_continuous_v0_target(target_reward_type: str) -> None:
             "created_at": datetime.now().isoformat(timespec="seconds"),
         },
     )
+    history_csv = append_compare_experiment_record(
+        EXPERIMENT_ROOT,
+        compare_dir,
+        root_v0,
+        root_target,
+        compare_type="equity_curve_continuous_5y",
+        extra={"target_reward_type": target_reward_type},
+    )
     print(f"continuous compare_v0_{target_reward_type} saved to: {compare_dir}")
+    print(f"Compare experiment history updated: {history_csv}")
 
 # =====================================================
 # 6. Main
@@ -2223,10 +2242,18 @@ if __name__ == "__main__":
             )
         rolling_root = create_rolling_root()
         experiment_timer.set_output_dir(rolling_root)
-        save_json(
-            rolling_root / "rolling_config.json",
-            {**base_experiment_config(), "rolling_root": str(rolling_root), "windows": windows},
+        rolling_config_payload = {
+            **base_experiment_config(),
+            "rolling_root": str(rolling_root),
+            "windows": windows,
+        }
+        save_json(rolling_root / "rolling_config.json", rolling_config_payload)
+        history_csv = append_reward_experiment_record(
+            EXPERIMENT_ROOT,
+            rolling_root,
+            rolling_config_payload,
         )
+        print(f"Reward experiment history updated: {history_csv}")
 
         print("========================================")
         print("Rolling Window 實驗設定")
@@ -2387,20 +2414,24 @@ if __name__ == "__main__":
         experiment_dir.mkdir(parents=True, exist_ok=True)
         experiment_timer.set_output_dir(experiment_dir)
         random_seed = BASE_RANDOM_SEED + 1
-        save_json(
-            experiment_dir / "experiment_config.json",
-            {
-                **base_experiment_config(),
-                "train_start_date": TRAIN_START_DATE,
-                "train_end_date": TRAIN_END_DATE,
-                "test_start_date": TEST_START_DATE,
-                "test_end_date": TEST_END_DATE,
-                "trade_start_date": TRADE_START_DATE,
-                "trade_end_date": TRADE_END_DATE,
-                "experiment_dir": str(experiment_dir),
-                "random_seed": random_seed,
-            },
+        single_config_payload = {
+            **base_experiment_config(),
+            "train_start_date": TRAIN_START_DATE,
+            "train_end_date": TRAIN_END_DATE,
+            "test_start_date": TEST_START_DATE,
+            "test_end_date": TEST_END_DATE,
+            "trade_start_date": TRADE_START_DATE,
+            "trade_end_date": TRADE_END_DATE,
+            "experiment_dir": str(experiment_dir),
+            "random_seed": random_seed,
+        }
+        save_json(experiment_dir / "experiment_config.json", single_config_payload)
+        history_csv = append_reward_experiment_record(
+            EXPERIMENT_ROOT,
+            experiment_dir,
+            single_config_payload,
         )
+        print(f"Reward experiment history updated: {history_csv}")
         child_env = build_child_environment(
             experiment_dir=experiment_dir,
             train_start_date=TRAIN_START_DATE,

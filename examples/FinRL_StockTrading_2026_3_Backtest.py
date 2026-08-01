@@ -9,7 +9,8 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from pathlib import Path
-from matplotlib.ticker import FuncFormatter, MaxNLocator
+from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.ticker import FuncFormatter
 
 import matplotlib
 
@@ -458,42 +459,78 @@ def save_agent_diagnostics(
     weights_path = OUTPUT_DIR / f"post_trade_weights_{suffix}.csv"
     weights.to_csv(weights_path, index=False, encoding="utf-8-sig")
 
-    # Backtest stage is for trade-period actions, holdings, and portfolio value.
+    # Backtest stage is for trade-period actions, holdings, weights, and portfolio value.
     # Reward curve is saved in FinRL_StockTrading_2026_2_train.py, because
     # reward analysis should correspond to the training window.
-    holdings_heatmap_path = OUTPUT_DIR / f"holdings_heatmap_{suffix}.png"
-    plot_holdings_heatmap(holdings, holdings_heatmap_path, agent_name)
-    source_rows = [
-        {
-            "image": holdings_heatmap_path.name,
-            "image_path": str(holdings_heatmap_path),
-            "source_role": "current_times_holdings_memory",
-            "source_csv": str(holdings_path),
-            "actions_csv": str(actions_path),
-            "weights_csv": str(weights_path),
-            "train_data": str(TRAIN_DATA_PATH),
-            "trade_data": str(TRADE_DATA_PATH),
-            "trained_model_dir": str(TRAINED_MODEL_DIR),
-            "stage": "backtest_times",
-            "reward_type": REWARD_TYPE,
-            "window_id": WINDOW_ID,
-            "times_index": TIMES_INDEX,
-            "random_seed": RANDOM_SEED,
-            "predict_deterministic": PREDICT_DETERMINISTIC,
-        }
-    ]
-    if agent_name.lower() == PRIMARY_AGENT_NAME and holdings_heatmap_path.exists():
-        canonical_heatmap_path = OUTPUT_DIR / f"holdings_heatmap_{PRIMARY_AGENT_NAME}.png"
-        canonical_heatmap_path.write_bytes(holdings_heatmap_path.read_bytes())
+    full_heatmap_path = OUTPUT_DIR / f"stock_weight_heatmap_{suffix}.png"
+    filtered_heatmap_path = OUTPUT_DIR / f"stock_weight_heatmap_nonzero_{suffix}.png"
+    plot_holdings_heatmap(
+        holdings,
+        weights,
+        full_heatmap_path,
+        agent_name,
+        remove_zero_stocks=False,
+    )
+    plot_holdings_heatmap(
+        holdings,
+        weights,
+        filtered_heatmap_path,
+        agent_name,
+        remove_zero_stocks=True,
+    )
+
+    # Keep the previous filename as a compatibility alias. Its stock section now
+    # uses portfolio weight (%) instead of number of shares.
+    legacy_heatmap_path = OUTPUT_DIR / f"holdings_heatmap_{suffix}.png"
+    if full_heatmap_path.exists():
+        legacy_heatmap_path.write_bytes(full_heatmap_path.read_bytes())
+
+    price_chart_dir = OUTPUT_DIR / f"stock_price_weight_changes_{suffix}"
+    price_chart_paths, weight_change_csv = plot_stock_price_weight_changes(
+        trade,
+        holdings,
+        weights,
+        price_chart_dir,
+        agent_name,
+    )
+
+    source_rows: list[dict[str, object]] = []
+    for image_path, role in [
+        (full_heatmap_path, "all_stock_portfolio_weight_heatmap"),
+        (filtered_heatmap_path, "nonzero_stock_portfolio_weight_heatmap"),
+        (legacy_heatmap_path, "legacy_holdings_heatmap_alias"),
+    ]:
+        if image_path.exists():
+            source_rows.append(
+                {
+                    "image": image_path.name,
+                    "image_path": str(image_path),
+                    "source_role": role,
+                    "source_csv": str(weights_path),
+                    "holdings_csv": str(holdings_path),
+                    "actions_csv": str(actions_path),
+                    "weights_csv": str(weights_path),
+                    "train_data": str(TRAIN_DATA_PATH),
+                    "trade_data": str(TRADE_DATA_PATH),
+                    "trained_model_dir": str(TRAINED_MODEL_DIR),
+                    "stage": "backtest_times",
+                    "reward_type": REWARD_TYPE,
+                    "window_id": WINDOW_ID,
+                    "times_index": TIMES_INDEX,
+                    "random_seed": RANDOM_SEED,
+                    "predict_deterministic": PREDICT_DETERMINISTIC,
+                }
+            )
+
+    for image_path in price_chart_paths:
         source_rows.append(
             {
-                "image": canonical_heatmap_path.name,
-                "image_path": str(canonical_heatmap_path),
-                "source_role": "current_times_holdings_memory",
-                "source_csv": str(holdings_path),
-                "actions_csv": str(actions_path),
+                "image": image_path.name,
+                "image_path": str(image_path),
+                "source_role": "stock_price_with_same_price_weight_change_markers",
+                "source_csv": str(weight_change_csv) if weight_change_csv else "",
+                "holdings_csv": str(holdings_path),
                 "weights_csv": str(weights_path),
-                "train_data": str(TRAIN_DATA_PATH),
                 "trade_data": str(TRADE_DATA_PATH),
                 "trained_model_dir": str(TRAINED_MODEL_DIR),
                 "stage": "backtest_times",
@@ -503,36 +540,111 @@ def save_agent_diagnostics(
                 "random_seed": RANDOM_SEED,
             }
         )
+
+    if agent_name.lower() == PRIMARY_AGENT_NAME:
+        canonical_files = [
+            (full_heatmap_path, OUTPUT_DIR / f"stock_weight_heatmap_{PRIMARY_AGENT_NAME}.png"),
+            (filtered_heatmap_path, OUTPUT_DIR / f"stock_weight_heatmap_nonzero_{PRIMARY_AGENT_NAME}.png"),
+            (legacy_heatmap_path, OUTPUT_DIR / f"holdings_heatmap_{PRIMARY_AGENT_NAME}.png"),
+        ]
+        for source_path, canonical_path in canonical_files:
+            if not source_path.exists():
+                continue
+            canonical_path.write_bytes(source_path.read_bytes())
+            source_rows.append(
+                {
+                    "image": canonical_path.name,
+                    "image_path": str(canonical_path),
+                    "source_role": "primary_agent_canonical_weight_heatmap",
+                    "source_csv": str(weights_path),
+                    "holdings_csv": str(holdings_path),
+                    "weights_csv": str(weights_path),
+                    "trade_data": str(TRADE_DATA_PATH),
+                    "trained_model_dir": str(TRAINED_MODEL_DIR),
+                    "stage": "backtest_times",
+                    "reward_type": REWARD_TYPE,
+                    "window_id": WINDOW_ID,
+                    "times_index": TIMES_INDEX,
+                    "random_seed": RANDOM_SEED,
+                }
+            )
+
     save_image_source_manifest(source_rows)
 
     print(f"Actions saved to {actions_path}")
     print(f"Holdings saved to {holdings_path}")
     print(f"Post-trade weights saved to {weights_path}")
+    print(f"All-stock weight heatmap saved to {full_heatmap_path}")
+    print(f"Nonzero-stock weight heatmap saved to {filtered_heatmap_path}")
+    if weight_change_csv is not None:
+        print(f"Stock price/weight-change source saved to {weight_change_csv}")
     print("Backtest reward curve is intentionally not saved here; see train_reward_curve_* from the training script.")
 
 
-def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: str) -> None:
-    """Plot a cash heatmap with an overlaid cash line and a stock holdings heatmap.
+WEIGHT_METADATA_COLUMNS = {
+    "date",
+    "cash_after_trade",
+    "total_asset_after_trade",
+    "cash_weight",
+    "stock_weight_sum",
+    "total_weight",
+}
 
-    The cash section shows:
-    1) a one-row cash heatmap labeled ``cash``
-    2) a line above it that traces intraday cash movement using
-       previous day close cash -> cash_after_sell -> cash_after_buy,
-       so users can still see trades even if end-of-day cash is similar.
+
+def get_stock_weight_columns(weights: pd.DataFrame) -> list[str]:
+    """Return only ticker columns from save_weight_memory()."""
+    return [column for column in weights.columns if column not in WEIGHT_METADATA_COLUMNS]
+
+
+def _aligned_cash_rows(holdings: pd.DataFrame, weights: pd.DataFrame) -> pd.DataFrame:
+    """Align holdings cash snapshots with the trade dates stored in weights."""
+    count = len(weights)
+    if count == 0:
+        return pd.DataFrame()
+    if len(holdings) >= count + 1:
+        aligned = holdings.iloc[1 : count + 1].reset_index(drop=True).copy()
+    else:
+        aligned = holdings.iloc[:count].reset_index(drop=True).copy()
+    aligned["date"] = weights["date"].iloc[: len(aligned)].to_numpy()
+    return aligned
+
+
+def plot_holdings_heatmap(
+    holdings: pd.DataFrame,
+    weights: pd.DataFrame,
+    out_path: Path,
+    agent_name: str,
+    remove_zero_stocks: bool = False,
+) -> None:
+    """Plot cash and stock portfolio weights for one backtest execution.
+
+    Stock values are percentages:
+        weight(i,t) = shares(i,t) * price(i,t) / total_asset(t) * 100
+
+    When ``remove_zero_stocks`` is True, stocks whose weight is zero for the
+    entire test period are omitted.
     """
-    if holdings.empty:
+    if weights.empty:
         return
-    if "date" not in holdings.columns:
-        holdings = holdings.copy()
-        holdings.insert(0, "date", np.arange(len(holdings)))
+    weights = weights.copy()
+    if "date" not in weights.columns:
+        weights.insert(0, "date", np.arange(len(weights)))
 
-    dates = holdings["date"].tolist()
+    dates = weights["date"].tolist()
+    cash_rows = _aligned_cash_rows(holdings, weights)
+    cash_after_buy = pd.to_numeric(weights.get("cash_after_trade"), errors="coerce")
+    if cash_after_buy is None or len(cash_after_buy) == 0:
+        cash_after_buy = pd.to_numeric(cash_rows.get("cash"), errors="coerce")
+    cash_after_sell = pd.to_numeric(cash_rows.get("cash_after_sell"), errors="coerce")
 
-    cash = holdings[["cash"]].T.astype(float) if "cash" in holdings.columns else pd.DataFrame()
-    cash_after_sell = holdings["cash_after_sell"].astype(float) if "cash_after_sell" in holdings.columns else None
-    cash_after_buy = holdings["cash_after_buy"].astype(float) if "cash_after_buy" in holdings.columns else (holdings["cash"].astype(float) if "cash" in holdings.columns else None)
+    cash = pd.DataFrame([cash_after_buy.to_numpy()], index=["cash"]) if cash_after_buy is not None else pd.DataFrame()
 
-    stocks = holdings.drop(columns=["date", "cash", "cash_after_sell", "cash_after_buy"], errors="ignore").T.astype(float)
+    stock_columns = get_stock_weight_columns(weights)
+    stock_weights = weights[stock_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    if remove_zero_stocks:
+        nonzero_columns = [column for column in stock_columns if (stock_weights[column].abs() > 1e-12).any()]
+        stock_weights = stock_weights[nonzero_columns]
+    stocks = (stock_weights * 100.0).T
 
     max_xticks = 12
     tick_positions = make_month_tick_positions(len(dates), max_xticks=max_xticks)
@@ -578,12 +690,15 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
         cbar_cash.ax.yaxis.set_major_formatter(FuncFormatter(money_formatter))
         cbar_cash.ax.tick_params(labelsize=9)
 
-        if cash_after_buy is not None:
+        if cash_after_buy is not None and len(cash_after_buy) > 0:
             line_x = [0.0]
             line_y = [float(cash_after_buy.iloc[0])]
-            for i in range(1, len(holdings)):
+            for i in range(1, len(weights)):
                 prev_end_cash = float(cash_after_buy.iloc[i - 1])
-                sell_cash = float(cash_after_sell.iloc[i]) if cash_after_sell is not None else prev_end_cash
+                if cash_after_sell is not None and i < len(cash_after_sell):
+                    sell_cash = float(cash_after_sell.iloc[i])
+                else:
+                    sell_cash = prev_end_cash
                 buy_cash = float(cash_after_buy.iloc[i])
                 line_x.extend([i - 0.28, i, i + 0.28])
                 line_y.extend([prev_end_cash, sell_cash, buy_cash])
@@ -593,7 +708,12 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
             ax_cash_line.yaxis.set_major_formatter(FuncFormatter(money_formatter))
             ax_cash_line.grid(True, axis="y", alpha=0.25)
             ax_cash_line.set_xlim(-0.5, max(len(dates) - 0.5, 0.5))
-            ax_cash_line.set_title(f"Holdings Heatmap - {agent_name.upper()} ({reward_display_name(REWARD_TYPE)})", pad=8)
+            title_suffix = " - Nonzero Stocks" if remove_zero_stocks else ""
+            ax_cash_line.set_title(
+                f"Portfolio Weight Heatmap{title_suffix} - {agent_name.upper()} "
+                f"({reward_display_name(REWARD_TYPE)})",
+                pad=8,
+            )
             ax_cash_line.text(
                 0.995,
                 0.92,
@@ -612,22 +732,57 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
         cax_cash.axis("off")
 
     if not stocks.empty:
+        # Use a fixed 0%-100% scale for all experiments.
+        # 0% is white, and each 10% interval moves through a clearly different
+        # color family so nearby weights are easier to distinguish.
+        # Values inside each 10% interval still change continuously, giving a
+        # darker / stronger tone as the percentage increases.
+        stock_values = stocks.to_numpy(dtype=float)
+        stock_values = np.nan_to_num(stock_values, nan=0.0, posinf=100.0, neginf=0.0)
+        stock_values = np.clip(stock_values, 0.0, 100.0)
+
+        stock_color_stops = [
+            (0.00, "#ffffff"),  # 0%
+            (0.10, "#dceeff"),  # 10%
+            (0.20, "#7fb3ff"),  # 20%
+            (0.30, "#00c8ff"),  # 30%
+            (0.40, "#00e5c3"),  # 40%
+            (0.50, "#39d353"),  # 50%
+            (0.60, "#b5e61d"),  # 60%
+            (0.70, "#ffe34d"),  # 70%
+            (0.80, "#ff9f1a"),  # 80%
+            (0.90, "#ff4d4f"),  # 90%
+            (1.00, "#8b0000"),  # 100%
+        ]
+        stock_cmap = LinearSegmentedColormap.from_list(
+            "portfolio_weight_multicolor", stock_color_stops
+        )
+        stock_norm = Normalize(vmin=0.0, vmax=100.0)
+
         stock_img = ax_stock.imshow(
-            stocks.values,
+            stock_values,
             aspect="auto",
             interpolation="nearest",
-            cmap="Blues",
+            cmap=stock_cmap,
+            norm=stock_norm,
         )
         ax_stock.set_yticks(np.arange(len(stocks.index)))
         ax_stock.set_yticklabels(stocks.index)
         ax_stock.set_ylabel("Stocks")
-        cbar_stock = fig.colorbar(stock_img, cax=cax_stock, orientation="vertical")
-        cbar_stock.set_label("Number of shares")
-        cbar_stock.ax.yaxis.set_major_locator(MaxNLocator(nbins=7, integer=True))
+        cbar_stock = fig.colorbar(
+            stock_img,
+            cax=cax_stock,
+            orientation="vertical",
+            ticks=np.arange(0, 101, 10),
+        )
+        cbar_stock.set_label("Portfolio weight (%)")
+        cbar_stock.ax.yaxis.set_major_formatter(
+            FuncFormatter(lambda value, pos: f"{int(round(value))}%")
+        )
         cbar_stock.ax.tick_params(labelsize=9)
     else:
         cax_stock.axis("off")
-        ax_stock.text(0.5, 0.5, "No stock holdings data", ha="center", va="center")
+        ax_stock.text(0.5, 0.5, "No stocks with weight > 0%", ha="center", va="center")
         ax_stock.set_yticks([])
 
     if len(tick_positions) > 0:
@@ -641,6 +796,145 @@ def plot_holdings_heatmap(holdings: pd.DataFrame, out_path: Path, agent_name: st
 
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def _safe_filename(value: str) -> str:
+    text = "".join(character if character.isalnum() or character in {"-", "_", "."} else "_" for character in str(value))
+    return text.strip("_") or "stock"
+
+
+def plot_stock_price_weight_changes(
+    trade_df: pd.DataFrame,
+    holdings: pd.DataFrame,
+    weights: pd.DataFrame,
+    out_dir: Path,
+    agent_name: str,
+) -> tuple[list[Path], Path | None]:
+    """Plot one price chart per stock ever held above 0%.
+
+    Red points mean the stock's same-price portfolio weight increased during
+    that day's trade. Green points mean it decreased. Both pre-trade and
+    post-trade weights use the current day's close price.
+    """
+    if trade_df.empty or holdings.empty or weights.empty or "date" not in weights.columns:
+        return [], None
+
+    stock_columns = [column for column in get_stock_weight_columns(weights) if column in holdings.columns]
+    if not stock_columns:
+        return [], None
+
+    price_col = str(REWARD_PARAMS.get("price_col", "close"))
+    if price_col not in trade_df.columns:
+        price_col = "close" if "close" in trade_df.columns else ""
+    if not price_col or "tic" not in trade_df.columns or "date" not in trade_df.columns:
+        print("Stock price/weight-change plots skipped: trade data lacks date/tic/price columns.")
+        return [], None
+
+    price_data = trade_df.reset_index(drop=True)[["date", "tic", price_col]].copy()
+    price_data["date"] = pd.to_datetime(price_data["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    price_data[price_col] = pd.to_numeric(price_data[price_col], errors="coerce")
+    price_pivot = price_data.pivot_table(index="date", columns="tic", values=price_col, aggfunc="last")
+
+    count = min(len(weights), max(len(holdings) - 1, 0))
+    if count <= 0:
+        return [], None
+
+    dates = pd.to_datetime(weights["date"].iloc[:count], errors="coerce").dt.strftime("%Y-%m-%d")
+    before_holdings = holdings.iloc[:count].reset_index(drop=True)
+    prices = price_pivot.reindex(dates)[stock_columns].apply(pd.to_numeric, errors="coerce")
+
+    before_shares = before_holdings[stock_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    cash_before = pd.to_numeric(before_holdings.get("cash"), errors="coerce").fillna(0.0)
+    pre_total_asset = cash_before.to_numpy() + (before_shares.to_numpy() * prices.to_numpy()).sum(axis=1)
+    pre_values = before_shares.to_numpy() * prices.to_numpy()
+    pre_weights = np.divide(
+        pre_values,
+        pre_total_asset[:, None],
+        out=np.zeros_like(pre_values, dtype=float),
+        where=np.isfinite(pre_total_asset[:, None]) & (pre_total_asset[:, None] > 1e-8),
+    )
+    pre_weights_df = pd.DataFrame(pre_weights, columns=stock_columns)
+
+    post_weights_df = (
+        weights[stock_columns]
+        .iloc[:count]
+        .reset_index(drop=True)
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+    )
+    delta_weights_df = post_weights_df - pre_weights_df
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    signal_rows: list[dict[str, object]] = []
+    output_paths: list[Path] = []
+    threshold = 1e-12
+
+    for ticker in stock_columns:
+        ever_held = ((pre_weights_df[ticker] > threshold) | (post_weights_df[ticker] > threshold)).any()
+        if not ever_held:
+            continue
+
+        stock_prices = prices[ticker].reset_index(drop=True)
+        delta_weight = delta_weights_df[ticker]
+        buy_mask = delta_weight > threshold
+        sell_mask = delta_weight < -threshold
+        plot_dates = pd.to_datetime(dates, errors="coerce")
+
+        fig, ax = plt.subplots(figsize=(15, 5))
+        ax.plot(plot_dates, stock_prices, linewidth=1.8, label=f"{ticker} close price")
+        if buy_mask.any():
+            ax.scatter(
+                plot_dates[buy_mask],
+                stock_prices[buy_mask],
+                color="red",
+                s=30,
+                zorder=3,
+                label="Weight increased (buy)",
+            )
+        if sell_mask.any():
+            ax.scatter(
+                plot_dates[sell_mask],
+                stock_prices[sell_mask],
+                color="green",
+                s=30,
+                zorder=3,
+                label="Weight decreased (sell)",
+            )
+        ax.set_title(
+            f"{ticker} Price and Same-Price Weight Changes - {agent_name.upper()} "
+            f"({reward_display_name(REWARD_TYPE)})"
+        )
+        set_axis_labels_horizontal(ax, "Date", "Close price")
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+        fig.tight_layout()
+
+        output_path = out_dir / f"{_safe_filename(ticker)}_price_weight_changes.png"
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        output_paths.append(output_path)
+
+        for row_index in range(count):
+            signal = "buy" if buy_mask.iloc[row_index] else "sell" if sell_mask.iloc[row_index] else "unchanged"
+            signal_rows.append(
+                {
+                    "date": dates.iloc[row_index],
+                    "tic": ticker,
+                    "close_price": stock_prices.iloc[row_index],
+                    "pre_trade_weight_pct": pre_weights_df[ticker].iloc[row_index] * 100.0,
+                    "post_trade_weight_pct": post_weights_df[ticker].iloc[row_index] * 100.0,
+                    "delta_weight_pct": delta_weight.iloc[row_index] * 100.0,
+                    "signal": signal,
+                }
+            )
+
+    if not signal_rows:
+        return output_paths, None
+
+    signal_csv = out_dir / "stock_price_weight_change_signals.csv"
+    pd.DataFrame(signal_rows).to_csv(signal_csv, index=False, encoding="utf-8-sig")
+    return output_paths, signal_csv
+
 
 def plot_reward_curve(rewards: pd.DataFrame, out_path: Path, agent_name: str) -> None:
     if rewards.empty:

@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from result_manager import append_compare_experiment_record
+
 try:
     from finrl import config
 except Exception:
@@ -696,8 +698,17 @@ def main() -> None:
     plot_compare(merged, compare_dir, root_v0, root_target, target_reward_type, COMPARE_DATA_MODE)
     write_compare_source_manifest(merged, compare_dir, root_v0, root_target, target_reward_type, df_v0, df_target, COMPARE_DATA_MODE)
     write_summary(merged, compare_dir, root_v0, root_target, target_reward_type, COMPARE_DATA_MODE)
+    history_csv = append_compare_experiment_record(
+        EXPERIMENT_ROOT,
+        compare_dir,
+        root_v0,
+        root_target,
+        compare_type=f"equity_curve_{COMPARE_DATA_MODE}",
+        extra={"target_reward_type": target_reward_type},
+    )
 
     print("Manual compare finished.")
+    print(f"Compare experiment history updated: {history_csv}")
     print(f"v0 source: {root_v0}")
     print(f"target reward: {target_reward_type}")
     print(f"target source: {root_target}")
