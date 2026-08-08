@@ -120,6 +120,7 @@ class StockTradingEnv(gym.Env):
         ]  # the initial total asset is calculated by cash + sum (num_share_stock_i * price_stock_i)
         self.rewards_memory = []
         self.actions_memory = []
+        self.agent_actions_memory = []
         self.state_memory = (
             []
         )  # we need sometimes to preserve the state in the middle of trading process
@@ -341,6 +342,10 @@ class StockTradingEnv(gym.Env):
             return self.state, self.reward, self.terminal, False, {}
 
         else:
+            # Preserve the policy output before hmax scaling, turbulence overrides,
+            # and execution constraints. This is the action the agent actually gave.
+            agent_actions = np.asarray(actions, dtype=float).copy()
+
             actions = actions * self.hmax  # actions initially is scaled between 0 to 1
             actions = actions.astype(
                 int
@@ -445,6 +450,7 @@ class StockTradingEnv(gym.Env):
             )
 
             self.actions_memory.append(actions)
+            self.agent_actions_memory.append(agent_actions)
 
             # state: s -> s+1
             self.day += 1
@@ -540,6 +546,7 @@ class StockTradingEnv(gym.Env):
         # self.iteration=self.iteration
         self.rewards_memory = []
         self.actions_memory = []
+        self.agent_actions_memory = []
         self.state_memory = []
         self.last_cash_after_sell = float(self.state[0])
         self.last_cash_after_buy = float(self.state[0])
@@ -796,6 +803,22 @@ class StockTradingEnv(gym.Env):
             date_list = self.date_memory[:-1]
             action_list = self.actions_memory
             df_actions = pd.DataFrame({"date": date_list, "actions": action_list})
+        return df_actions
+
+    def save_agent_action_memory(self):
+        """Return the original policy actions in the [-1, 1] action space."""
+        if len(self.df.tic.unique()) > 1:
+            date_list = self.date_memory[:-1]
+            df_date = pd.DataFrame(date_list, columns=["date"])
+
+            df_actions = pd.DataFrame(self.agent_actions_memory)
+            df_actions.columns = self.data.tic.values
+            df_actions.index = df_date.date
+        else:
+            date_list = self.date_memory[:-1]
+            df_actions = pd.DataFrame(
+                {"date": date_list, "actions": self.agent_actions_memory}
+            )
         return df_actions
 
     def _seed(self, seed=None):

@@ -74,7 +74,7 @@ REWARD_PARAMS_BY_TYPE = {
         "price_col": "close",
     },
     "v6": {
-        "n_future": 20,
+        "n_future": 60,
         "price_col": "close",
         "future_variable": V6_FUTURE_VARIABLE,
         "delta_weight_variable": V6_DELTA_WEIGHT_VARIABLE,
@@ -511,23 +511,16 @@ def generate_rolling_windows(
 
 def create_rolling_root() -> Path:
     date_tag = datetime.now().strftime("%Y%m%d")
+    time_tag = datetime.now().strftime("%H%M%S")
     start_year = _year(ROLLING_START_DATE)
     end_year = _year(ROLLING_END_DATE)
     model_name = primary_agent_name()
-    run_prefix = (
+    run_name = (
         f"rolling_{start_year}-{end_year}_"
         f"train{TRAIN_YEARS}y_test{TEST_YEARS}y_shift{SHIFT_YEARS}y_"
-        f"{date_tag}"
+        f"{date_tag}_{time_tag}_{model_name}"
     )
-    run_name = f"{run_prefix}_{model_name}"
     rolling_root = Path(EXPERIMENT_ROOT) / f"reward_{REWARD_TYPE}" / run_name
-    if rolling_root.exists():
-        time_tag = datetime.now().strftime("%H%M%S")
-        rolling_root = (
-            Path(EXPERIMENT_ROOT)
-            / f"reward_{REWARD_TYPE}"
-            / f"{run_prefix}_{time_tag}_{model_name}"
-        )
     rolling_root.mkdir(parents=True, exist_ok=True)
     return rolling_root
 

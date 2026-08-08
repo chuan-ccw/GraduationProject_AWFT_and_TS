@@ -425,6 +425,7 @@ def predict_and_collect(model, agent_name: str):
 
     account_value = test_env.env_method(method_name="save_asset_memory")[0]
     actions = test_env.env_method(method_name="save_action_memory")[0]
+    agent_actions = test_env.env_method(method_name="save_agent_action_memory")[0]
     holdings = test_env.env_method(method_name="save_holdings_memory")[0]
     weights = test_env.env_method(method_name="save_weight_memory")[0]
     rewards = test_env.env_method(method_name="save_reward_memory")[0]
@@ -433,6 +434,7 @@ def predict_and_collect(model, agent_name: str):
         agent_name,
         account_value,
         actions,
+        agent_actions,
         holdings,
         weights,
         rewards,
@@ -444,6 +446,7 @@ def save_agent_diagnostics(
     agent_name: str,
     account_value: pd.DataFrame,
     actions: pd.DataFrame,
+    agent_actions: pd.DataFrame,
     holdings: pd.DataFrame,
     weights: pd.DataFrame,
     rewards: pd.DataFrame,
@@ -452,6 +455,9 @@ def save_agent_diagnostics(
 
     actions_path = OUTPUT_DIR / f"actions_{suffix}.csv"
     actions.to_csv(actions_path, index=True, encoding="utf-8-sig")
+
+    agent_actions_path = OUTPUT_DIR / f"agent_actions_{suffix}.csv"
+    agent_actions.to_csv(agent_actions_path, index=True, encoding="utf-8-sig")
 
     holdings_path = OUTPUT_DIR / f"holdings_{suffix}.csv"
     holdings.to_csv(holdings_path, index=False, encoding="utf-8-sig")
@@ -485,12 +491,12 @@ def save_agent_diagnostics(
     if full_heatmap_path.exists():
         legacy_heatmap_path.write_bytes(full_heatmap_path.read_bytes())
 
-    price_chart_dir = OUTPUT_DIR / f"stock_price_weight_changes_{suffix}"
-    price_chart_paths, weight_change_csv = plot_stock_price_weight_changes(
+    stock_chart_dir = OUTPUT_DIR / f"stock_chart_{suffix}"
+    stock_chart_paths, action_signal_csv = plot_stock_price_agent_actions(
         trade,
-        holdings,
+        actions,
         weights,
-        price_chart_dir,
+        stock_chart_dir,
         agent_name,
     )
 
@@ -509,6 +515,7 @@ def save_agent_diagnostics(
                     "source_csv": str(weights_path),
                     "holdings_csv": str(holdings_path),
                     "actions_csv": str(actions_path),
+                    "agent_actions_csv": str(agent_actions_path),
                     "weights_csv": str(weights_path),
                     "train_data": str(TRAIN_DATA_PATH),
                     "trade_data": str(TRADE_DATA_PATH),
@@ -522,13 +529,15 @@ def save_agent_diagnostics(
                 }
             )
 
-    for image_path in price_chart_paths:
+    for image_path in stock_chart_paths:
         source_rows.append(
             {
                 "image": image_path.name,
                 "image_path": str(image_path),
-                "source_role": "stock_price_with_same_price_weight_change_markers",
-                "source_csv": str(weight_change_csv) if weight_change_csv else "",
+                "source_role": "stock_price_with_executed_action_markers",
+                "source_csv": str(action_signal_csv) if action_signal_csv else "",
+                "actions_csv": str(actions_path),
+                "agent_actions_csv": str(agent_actions_path),
                 "holdings_csv": str(holdings_path),
                 "weights_csv": str(weights_path),
                 "trade_data": str(TRADE_DATA_PATH),
@@ -571,13 +580,14 @@ def save_agent_diagnostics(
 
     save_image_source_manifest(source_rows)
 
-    print(f"Actions saved to {actions_path}")
+    print(f"Executed actions saved to {actions_path}")
+    print(f"Agent actions saved to {agent_actions_path}")
     print(f"Holdings saved to {holdings_path}")
     print(f"Post-trade weights saved to {weights_path}")
     print(f"All-stock weight heatmap saved to {full_heatmap_path}")
     print(f"Nonzero-stock weight heatmap saved to {filtered_heatmap_path}")
-    if weight_change_csv is not None:
-        print(f"Stock price/weight-change source saved to {weight_change_csv}")
+    if action_signal_csv is not None:
+        print(f"Stock price/executed-action source saved to {action_signal_csv}")
     print("Backtest reward curve is intentionally not saved here; see train_reward_curve_* from the training script.")
 
 
@@ -803,23 +813,22 @@ def _safe_filename(value: str) -> str:
     return text.strip("_") or "stock"
 
 
-def plot_stock_price_weight_changes(
+def plot_stock_price_agent_actions(
     trade_df: pd.DataFrame,
-    holdings: pd.DataFrame,
+    executed_actions: pd.DataFrame,
     weights: pd.DataFrame,
     out_dir: Path,
     agent_name: str,
 ) -> tuple[list[Path], Path | None]:
-    """Plot one price chart per stock ever held above 0%.
-
-    Red points mean the stock's same-price portfolio weight increased during
-    that day's trade. Green points mean it decreased. Both pre-trade and
-    post-trade weights use the current day's close price.
-    """
-    if trade_df.empty or holdings.empty or weights.empty or "date" not in weights.columns:
+    """Plot executed buy/sell actions for stocks whose portfolio weight exceeds 0%."""
+    if trade_df.empty or executed_actions.empty or weights.empty or "date" not in weights.columns:
         return [], None
 
-    stock_columns = [column for column in get_stock_weight_columns(weights) if column in holdings.columns]
+    stock_columns = [
+        column
+        for column in get_stock_weight_columns(weights)
+        if column in executed_actions.columns
+    ]
     if not stock_columns:
         return [], None
 
@@ -827,7 +836,7 @@ def plot_stock_price_weight_changes(
     if price_col not in trade_df.columns:
         price_col = "close" if "close" in trade_df.columns else ""
     if not price_col or "tic" not in trade_df.columns or "date" not in trade_df.columns:
-        print("Stock price/weight-change plots skipped: trade data lacks date/tic/price columns.")
+        print("Stock price/action plots skipped: trade data lacks date/tic/price columns.")
         return [], None
 
     price_data = trade_df.reset_index(drop=True)[["date", "tic", price_col]].copy()
@@ -835,50 +844,43 @@ def plot_stock_price_weight_changes(
     price_data[price_col] = pd.to_numeric(price_data[price_col], errors="coerce")
     price_pivot = price_data.pivot_table(index="date", columns="tic", values=price_col, aggfunc="last")
 
-    count = min(len(weights), max(len(holdings) - 1, 0))
+    count = min(len(weights), len(executed_actions))
     if count <= 0:
         return [], None
 
     dates = pd.to_datetime(weights["date"].iloc[:count], errors="coerce").dt.strftime("%Y-%m-%d")
-    before_holdings = holdings.iloc[:count].reset_index(drop=True)
     prices = price_pivot.reindex(dates)[stock_columns].apply(pd.to_numeric, errors="coerce")
-
-    before_shares = before_holdings[stock_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    cash_before = pd.to_numeric(before_holdings.get("cash"), errors="coerce").fillna(0.0)
-    pre_total_asset = cash_before.to_numpy() + (before_shares.to_numpy() * prices.to_numpy()).sum(axis=1)
-    pre_values = before_shares.to_numpy() * prices.to_numpy()
-    pre_weights = np.divide(
-        pre_values,
-        pre_total_asset[:, None],
-        out=np.zeros_like(pre_values, dtype=float),
-        where=np.isfinite(pre_total_asset[:, None]) & (pre_total_asset[:, None] > 1e-8),
-    )
-    pre_weights_df = pd.DataFrame(pre_weights, columns=stock_columns)
-
-    post_weights_df = (
+    stock_weights = (
         weights[stock_columns]
         .iloc[:count]
         .reset_index(drop=True)
         .apply(pd.to_numeric, errors="coerce")
         .fillna(0.0)
     )
-    delta_weights_df = post_weights_df - pre_weights_df
+    action_values = (
+        executed_actions[stock_columns]
+        .iloc[:count]
+        .reset_index(drop=True)
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+    )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     signal_rows: list[dict[str, object]] = []
     output_paths: list[Path] = []
     threshold = 1e-12
+    plot_dates = pd.to_datetime(dates, errors="coerce")
 
     for ticker in stock_columns:
-        ever_held = ((pre_weights_df[ticker] > threshold) | (post_weights_df[ticker] > threshold)).any()
-        if not ever_held:
+        # Draw only stocks whose post-trade portfolio weight is above 0%
+        # at least once during this backtest period.
+        if not (stock_weights[ticker] > threshold).any():
             continue
 
         stock_prices = prices[ticker].reset_index(drop=True)
-        delta_weight = delta_weights_df[ticker]
-        buy_mask = delta_weight > threshold
-        sell_mask = delta_weight < -threshold
-        plot_dates = pd.to_datetime(dates, errors="coerce")
+        ticker_actions = action_values[ticker]
+        buy_mask = ticker_actions > threshold
+        sell_mask = ticker_actions < -threshold
 
         fig, ax = plt.subplots(figsize=(15, 5))
         ax.plot(plot_dates, stock_prices, linewidth=1.8, label=f"{ticker} close price")
@@ -889,7 +891,7 @@ def plot_stock_price_weight_changes(
                 color="red",
                 s=30,
                 zorder=3,
-                label="Weight increased (buy)",
+                label="Executed action > 0 (buy)",
             )
         if sell_mask.any():
             ax.scatter(
@@ -898,32 +900,34 @@ def plot_stock_price_weight_changes(
                 color="green",
                 s=30,
                 zorder=3,
-                label="Weight decreased (sell)",
+                label="Executed action < 0 (sell)",
             )
-        ax.set_title(
-            f"{ticker} Price and Same-Price Weight Changes - {agent_name.upper()} "
-            f"({reward_display_name(REWARD_TYPE)})"
-        )
+        ax.set_title(f"{ticker} Stock Chart - {agent_name.upper()}")
         set_axis_labels_horizontal(ax, "Date", "Close price")
         ax.grid(True, alpha=0.25)
         ax.legend()
         fig.tight_layout()
 
-        output_path = out_dir / f"{_safe_filename(ticker)}_price_weight_changes.png"
+        output_path = out_dir / f"{_safe_filename(ticker)}_stock_chart.png"
         fig.savefig(output_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         output_paths.append(output_path)
 
         for row_index in range(count):
-            signal = "buy" if buy_mask.iloc[row_index] else "sell" if sell_mask.iloc[row_index] else "unchanged"
+            signal = (
+                "buy"
+                if buy_mask.iloc[row_index]
+                else "sell"
+                if sell_mask.iloc[row_index]
+                else "hold"
+            )
             signal_rows.append(
                 {
                     "date": dates.iloc[row_index],
                     "tic": ticker,
                     "close_price": stock_prices.iloc[row_index],
-                    "pre_trade_weight_pct": pre_weights_df[ticker].iloc[row_index] * 100.0,
-                    "post_trade_weight_pct": post_weights_df[ticker].iloc[row_index] * 100.0,
-                    "delta_weight_pct": delta_weight.iloc[row_index] * 100.0,
+                    "portfolio_weight_pct": stock_weights[ticker].iloc[row_index] * 100.0,
+                    "executed_action": ticker_actions.iloc[row_index],
                     "signal": signal,
                 }
             )
@@ -931,7 +935,7 @@ def plot_stock_price_weight_changes(
     if not signal_rows:
         return output_paths, None
 
-    signal_csv = out_dir / "stock_price_weight_change_signals.csv"
+    signal_csv = out_dir / "stock_price_executed_action_signals.csv"
     pd.DataFrame(signal_rows).to_csv(signal_csv, index=False, encoding="utf-8-sig")
     return output_paths, signal_csv
 
