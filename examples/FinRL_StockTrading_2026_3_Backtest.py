@@ -429,6 +429,9 @@ def predict_and_collect(model, agent_name: str):
     holdings = test_env.env_method(method_name="save_holdings_memory")[0]
     weights = test_env.env_method(method_name="save_weight_memory")[0]
     rewards = test_env.env_method(method_name="save_reward_memory")[0]
+    reward_components = test_env.env_method(
+        method_name="save_reward_components_memory"
+    )[0]
 
     save_agent_diagnostics(
         agent_name,
@@ -438,6 +441,7 @@ def predict_and_collect(model, agent_name: str):
         holdings,
         weights,
         rewards,
+        reward_components,
     )
     return account_value, actions, holdings, weights, rewards
 
@@ -450,6 +454,7 @@ def save_agent_diagnostics(
     holdings: pd.DataFrame,
     weights: pd.DataFrame,
     rewards: pd.DataFrame,
+    reward_components: pd.DataFrame,
 ) -> None:
     suffix = f"{agent_name}_{REWARD_TYPE}_{TRADE_START_DATE}_to_{TRADE_END_DATE}_{today_str}"
 
@@ -465,9 +470,16 @@ def save_agent_diagnostics(
     weights_path = OUTPUT_DIR / f"post_trade_weights_{suffix}.csv"
     weights.to_csv(weights_path, index=False, encoding="utf-8-sig")
 
-    # Backtest stage is for trade-period actions, holdings, weights, and portfolio value.
-    # Reward curve is saved in FinRL_StockTrading_2026_2_train.py, because
-    # reward analysis should correspond to the training window.
+    reward_components_path = OUTPUT_DIR / f"reward_components_{suffix}.csv"
+    reward_components.to_csv(
+        reward_components_path,
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    # Backtest stage saves trade-period diagnostics. The training reward curve
+    # remains in FinRL_StockTrading_2026_2_train.py; reward_components here are
+    # the per-stock daily rewards used for Annual Reset individual-stock plots.
     full_heatmap_path = OUTPUT_DIR / f"stock_weight_heatmap_{suffix}.png"
     filtered_heatmap_path = OUTPUT_DIR / f"stock_weight_heatmap_nonzero_{suffix}.png"
     plot_holdings_heatmap(
@@ -582,6 +594,7 @@ def save_agent_diagnostics(
 
     print(f"Executed actions saved to {actions_path}")
     print(f"Agent actions saved to {agent_actions_path}")
+    print(f"Individual reward components saved to {reward_components_path}")
     print(f"Holdings saved to {holdings_path}")
     print(f"Post-trade weights saved to {weights_path}")
     print(f"All-stock weight heatmap saved to {full_heatmap_path}")
@@ -869,7 +882,10 @@ def plot_stock_price_agent_actions(
     signal_rows: list[dict[str, object]] = []
     output_paths: list[Path] = []
     threshold = 1e-12
-    plot_dates = pd.to_datetime(dates, errors="coerce")
+    # Match the individual stock reward curve: use trading-day positions on the
+    # x-axis, then label 12 evenly spaced positions as YYYY-MM. Matplotlib's
+    # default x margin leaves blank space before January and after December.
+    plot_positions = np.arange(count)
 
     for ticker in stock_columns:
         # Draw only stocks whose post-trade portfolio weight is above 0%
@@ -883,10 +899,10 @@ def plot_stock_price_agent_actions(
         sell_mask = ticker_actions < -threshold
 
         fig, ax = plt.subplots(figsize=(15, 5))
-        ax.plot(plot_dates, stock_prices, linewidth=1.8, label=f"{ticker} close price")
+        ax.plot(plot_positions, stock_prices, linewidth=1.8, label=f"{ticker} close price")
         if buy_mask.any():
             ax.scatter(
-                plot_dates[buy_mask],
+                plot_positions[buy_mask.to_numpy()],
                 stock_prices[buy_mask],
                 color="red",
                 s=30,
@@ -895,13 +911,14 @@ def plot_stock_price_agent_actions(
             )
         if sell_mask.any():
             ax.scatter(
-                plot_dates[sell_mask],
+                plot_positions[sell_mask.to_numpy()],
                 stock_prices[sell_mask],
                 color="green",
                 s=30,
                 zorder=3,
                 label="Executed action < 0 (sell)",
             )
+        set_month_xticklabels(ax, dates, max_xticks=12)
         ax.set_title(f"{ticker} Stock Chart - {agent_name.upper()}")
         set_axis_labels_horizontal(ax, "Date", "Close price")
         ax.grid(True, alpha=0.25)

@@ -31,6 +31,7 @@ calculate_stock_weights_after_trade = (
 calculate_reward = _REWARD_MODULE.calculate_reward
 reward_v5 = _REWARD_MODULE.reward_v5
 reward_v6 = _REWARD_MODULE.reward_v6
+reward_v3 = _REWARD_MODULE.reward_v3
 
 
 def _make_price_df() -> pd.DataFrame:
@@ -57,6 +58,64 @@ def _make_direction_price_df() -> pd.DataFrame:
         for tic, close in day_prices.items():
             rows.append({"day": day, "tic": tic, "close": close})
     return pd.DataFrame(rows).set_index("day")
+
+
+def _make_v3_price_df() -> pd.DataFrame:
+    rows = []
+    prices = {
+        0: {"AAA": 10.0, "BBB": 20.0},
+        1: {"AAA": 11.0, "BBB": 18.0},
+        2: {"AAA": 13.0, "BBB": 18.0},
+    }
+    for day, day_prices in prices.items():
+        for tic, close in day_prices.items():
+            rows.append({"day": day, "tic": tic, "close": close})
+    return pd.DataFrame(rows).set_index("day")
+
+
+def test_reward_v3_uses_final_executed_actions() -> None:
+    env = SimpleNamespace(df=_make_v3_price_df(), hmax=100, stock_dim=2)
+    ctx = RewardContext(
+        env=env,
+        begin_total_asset=800.0,
+        end_total_asset=800.0,
+        raw_actions=np.array([100.0, -100.0]),
+        current_prices_before_trade=np.array([10.0, 20.0]),
+        stock_weights_after_trade=np.array([0.25, 0.25]),
+        cost_before_trade=0.0,
+        current_day=0,
+        tic_list=["AAA", "BBB"],
+        executed_actions=np.array([20.0, -10.0]),
+    )
+
+    reward = reward_v3(ctx, {"n_future": 2, "price_col": "close"})
+
+    # Executed action units = [+0.20, -0.10].
+    # AAA future average = 12 -> +20%; BBB future average = 18 -> -10%.
+    # reward = 0.20 * 0.20 + (-0.10) * (-0.10) = 0.05.
+    assert np.isclose(reward, 0.05)
+
+
+def test_reward_v3_normalizes_one_executed_share_by_hmax() -> None:
+    env = SimpleNamespace(df=_make_v3_price_df(), hmax=100, stock_dim=2)
+    ctx = RewardContext(
+        env=env,
+        begin_total_asset=800.0,
+        end_total_asset=800.0,
+        raw_actions=np.array([100.0, 0.0]),
+        current_prices_before_trade=np.array([10.0, 20.0]),
+        stock_weights_after_trade=np.array([0.25, 0.25]),
+        cost_before_trade=0.0,
+        current_day=0,
+        tic_list=["AAA", "BBB"],
+        executed_actions=np.array([1.0, 0.0]),
+    )
+
+    reward = reward_v3(ctx, {"n_future": 2, "price_col": "close"})
+
+    # One executed share means action unit = 1 / 100 = 0.01, not +1.0.
+    # reward = 0.01 * 0.20 = 0.002.
+    assert np.isclose(reward, 0.002)
 
 
 def test_calculate_stock_weights_after_trade_includes_cash() -> None:

@@ -21,6 +21,7 @@ class RewardContext:
     tic_list: list
     previous_stock_weights_after_trade: np.ndarray | None = None
     stock_weights_before_trade: np.ndarray | None = None
+    executed_actions: np.ndarray | None = None
 
 
 def reward_v0(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float:
@@ -113,6 +114,36 @@ def _action_to_unit_array(actions: np.ndarray, hmax: float, eps: float = 1e-8) -
         actions = actions / (hmax + eps)
 
     return np.clip(actions, -1.0, 1.0)
+
+
+def _executed_action_to_unit_array(
+    ctx: RewardContext,
+    eps: float = 1e-8,
+) -> np.ndarray:
+    """Convert final executed share counts to action units in [-1, 1].
+
+    Executed actions are always share counts after cash/holding constraints have
+    been applied, so they must always be divided by hmax. Unlike raw model
+    actions, a value such as 1 can mean one executed share rather than +1.0.
+    """
+    executed_actions = ctx.executed_actions
+    if executed_actions is None:
+        actions_memory = getattr(ctx.env, "actions_memory", None)
+        if actions_memory:
+            executed_actions = actions_memory[-1]
+
+    if executed_actions is None:
+        raise ValueError(
+            "reward_v3 requires final executed actions after environment "
+            "cash/holding constraints are applied."
+        )
+
+    hmax = float(ctx.env.hmax)
+    if not np.isfinite(hmax) or hmax <= eps:
+        raise ValueError("env.hmax must be a positive finite value for reward_v3.")
+
+    executed_actions = np.asarray(executed_actions, dtype=float)
+    return np.clip(executed_actions / hmax, -1.0, 1.0)
 
 
 def calculate_stock_weights_after_trade(
@@ -251,23 +282,24 @@ def reward_v3(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     """
     Jason reward v3.
 
-    使用未來 n 天平均價格計算 simple return。
+    使用最終實際成交 action 與未來 n 天平均價格計算 simple return。
 
     Formula:
-        R_t = sum_i a(i,t) * r(i,t)
+        R_t = sum_i executed_a(i,t) * r(i,t)
 
         r(i,t) = (avg_p(i,t)^n - p(i,t)) / p(i,t)
 
         avg_p(i,t)^n = 1/n * sum_{k=t+1}^{t+n} p(i,k)
 
     其中：
-        a(i,t): 第 i 檔股票在第 t 天的 action value, range = [-1, 1]
+        executed_a(i,t): 第 i 檔股票在第 t 天最終實際成交股數 / hmax,
+                         range = [-1, 1]
         p(i,t): 第 i 檔股票在第 t 天的價格
         avg_p(i,t)^n: 第 i 檔股票未來 n 天平均價格
 
     Meaning:
-        v2 only looks at the price on t+n.
-        v3 uses the average price from t+1 to t+n, so it is smoother.
+        reward only uses trades that the environment actually executes after
+        cash and holding constraints are applied.
     """
     params = params or {}
 
@@ -291,7 +323,7 @@ def reward_v3(ctx: RewardContext, params: Dict[str, Any] | None = None) -> float
     avg_future_prices = np.nanmean(future_window, axis=0)
 
     simple_returns = (avg_future_prices - current_prices) / (current_prices + eps)
-    action_units = _action_to_unit_array(ctx.raw_actions, ctx.env.hmax, eps)
+    action_units = _executed_action_to_unit_array(ctx, eps)
 
     valid = (
         np.isfinite(current_prices)
@@ -768,6 +800,310 @@ def reward_v6(
         return 0.0
 
     return float(np.sum(delta_weights[valid] * future_signal[valid]))
+
+
+def calculate_individual_reward_components(
+    reward_type: str,
+    ctx: RewardContext,
+    params: Dict[str, Any] | None = None,
+) -> np.ndarray:
+    """Return each stock's contribution to the selected unscaled reward.
+
+    The returned array has one value per stock and is calculated from the same
+    inputs/formula used by reward_v0 ... reward_v6. Summing the valid stock
+    components reproduces the corresponding portfolio reward (up to floating
+    point rounding).
+    """
+    params = params or {}
+    key = str(reward_type).strip().lower()
+    if key.startswith("reward_"):
+        key = key[len("reward_") :]
+
+    aliases = {
+        "original": "v0",
+        "finrl_original": "v0",
+        "our_reward_v1": "v1",
+        "future_day_return": "v2",
+        "future_avg_return": "v3",
+        "future_avg_delta_action_return": "v4",
+        "future_avg_delta_action_reward": "v4",
+        "weight_future": "v5",
+        "reward_weight_future": "v5",
+        "weight_future_reward": "v5",
+        "portfolio_weighted_future_return": "v5",
+        "portfolio_weighted_future_return_reward": "v5",
+        "wft": "v5",
+        "weighted_future_trend": "v5",
+        "weighted_future_trend_reward": "v5",
+        "delta_weight_future": "v6",
+        "reward_delta_weight_future": "v6",
+        "delta_weight_future_reward": "v6",
+        "portfolio_weight_change_future_return": "v6",
+        "portfolio_weight_change_future_return_reward": "v6",
+        "dwft": "v6",
+        "delta_weighted_future_trend": "v6",
+        "delta_weighted_future_trend_reward": "v6",
+    }
+    key = aliases.get(key, key)
+
+    stock_dim = int(ctx.env.stock_dim)
+    zeros = np.zeros(stock_dim, dtype=float)
+    eps = float(params.get("eps", 1e-8))
+    current_prices = np.asarray(ctx.current_prices_before_trade, dtype=float)
+
+    if key == "v0" or key == "v1":
+        # Decompose the portfolio asset change stock-by-stock. Executed trades
+        # are already stored in actions_memory when reward calculation runs.
+        if not getattr(ctx.env, "actions_memory", None):
+            base_components = zeros.copy()
+        else:
+            executed_actions = np.asarray(ctx.env.actions_memory[-1], dtype=float)
+            end_prices = np.asarray(
+                ctx.env.state[1 : stock_dim + 1],
+                dtype=float,
+            )
+            end_holdings = np.asarray(
+                ctx.env.state[stock_dim + 1 : stock_dim * 2 + 1],
+                dtype=float,
+            )
+            begin_holdings = end_holdings - executed_actions
+            buy_cost = np.asarray(ctx.env.buy_cost_pct, dtype=float)
+            sell_cost = np.asarray(ctx.env.sell_cost_pct, dtype=float)
+
+            stock_value_change = (
+                end_holdings * end_prices - begin_holdings * current_prices
+            )
+            cash_flow = np.zeros(stock_dim, dtype=float)
+            buy_mask = executed_actions > 0
+            sell_mask = executed_actions < 0
+            cash_flow[buy_mask] = -(
+                executed_actions[buy_mask]
+                * current_prices[buy_mask]
+                * (1.0 + buy_cost[buy_mask])
+            )
+            cash_flow[sell_mask] = -(
+                executed_actions[sell_mask]
+                * current_prices[sell_mask]
+                * (1.0 - sell_cost[sell_mask])
+            )
+            base_components = stock_value_change + cash_flow
+            base_components = np.nan_to_num(
+                base_components, nan=0.0, posinf=0.0, neginf=0.0
+            )
+
+        if key == "v0":
+            return base_components
+
+        # v1 = portfolio simple return + per-stock buy-low/sell-high scores.
+        components = base_components / (ctx.begin_total_asset + eps)
+        alpha = float(params.get("alpha", 0.05))
+        beta = float(params.get("beta", 0.05))
+        n_recent = int(params.get("n_recent", 14))
+        start_day = max(0, ctx.current_day - n_recent + 1)
+
+        for i, action in enumerate(ctx.raw_actions):
+            tic = ctx.tic_list[i]
+            recent_data = ctx.env.df.loc[start_day : ctx.current_day]
+            recent_data = recent_data[recent_data["tic"] == tic]
+            if recent_data.empty:
+                continue
+
+            if "high" in recent_data.columns and "low" in recent_data.columns:
+                recent_high = recent_data["high"].max()
+                recent_low = recent_data["low"].min()
+            else:
+                recent_high = recent_data["close"].max()
+                recent_low = recent_data["close"].min()
+
+            price_range = recent_high - recent_low + eps
+            buy_low_score = np.clip(
+                (recent_high - current_prices[i]) / price_range, 0, 1
+            )
+            sell_high_score = np.clip(
+                (current_prices[i] - recent_low) / price_range, 0, 1
+            )
+            action_strength = abs(action) / (ctx.env.hmax + eps)
+            if action > 0:
+                components[i] += (
+                    alpha * buy_low_score * action_strength / ctx.env.stock_dim
+                )
+            elif action < 0:
+                components[i] += (
+                    beta * sell_high_score * action_strength / ctx.env.stock_dim
+                )
+        return np.nan_to_num(components, nan=0.0, posinf=0.0, neginf=0.0)
+
+    price_col = params.get("price_col", "close")
+    price_matrix, day_to_pos = _get_price_matrix(ctx.env, ctx.tic_list, price_col)
+    current_pos = day_to_pos.get(ctx.current_day)
+    if current_pos is None:
+        return zeros
+
+    n_future = int(params.get("n_future", 5))
+
+    if key == "v2":
+        future_pos = current_pos + n_future
+        if future_pos >= price_matrix.shape[0]:
+            return zeros
+        future_prices = price_matrix[future_pos]
+        signal = (future_prices - current_prices) / (current_prices + eps)
+        action_units = _action_to_unit_array(ctx.raw_actions, ctx.env.hmax, eps)
+        valid = (
+            np.isfinite(current_prices)
+            & np.isfinite(future_prices)
+            & np.isfinite(signal)
+            & (current_prices > eps)
+            & (future_prices > eps)
+        )
+        components = zeros.copy()
+        components[valid] = action_units[valid] * signal[valid]
+        return components
+
+    start_pos = current_pos + 1
+    end_pos = current_pos + n_future + 1
+    if end_pos > price_matrix.shape[0]:
+        return zeros
+
+    future_window = price_matrix[start_pos:end_pos]
+    avg_future_prices = np.nanmean(future_window, axis=0)
+    future_avg_returns = (avg_future_prices - current_prices) / (
+        current_prices + eps
+    )
+    common_valid = (
+        np.isfinite(current_prices)
+        & np.isfinite(avg_future_prices)
+        & np.isfinite(future_avg_returns)
+        & np.all(np.isfinite(future_window), axis=0)
+        & (current_prices > eps)
+        & (avg_future_prices > eps)
+    )
+
+    if key == "v3":
+        action_units = _executed_action_to_unit_array(ctx, eps)
+        components = zeros.copy()
+        components[common_valid] = (
+            action_units[common_valid] * future_avg_returns[common_valid]
+        )
+        return components
+
+    if key == "v4":
+        c = float(params.get("c", 0.05))
+        if not 0.0 <= c <= 1.0:
+            raise ValueError("reward_v4 parameter 'c' must be in [0, 1].")
+        current_action_units = _action_to_unit_array(
+            ctx.raw_actions, ctx.env.hmax, eps
+        )
+        previous_action_units = getattr(
+            ctx.env, "_reward_v4_previous_action_units", None
+        )
+        if (
+            ctx.current_day == 0
+            or previous_action_units is None
+            or len(previous_action_units) != len(current_action_units)
+        ):
+            previous_action_units = np.zeros_like(
+                current_action_units, dtype=float
+            )
+        else:
+            previous_action_units = np.asarray(
+                previous_action_units, dtype=float
+            )
+        delta_a = current_action_units - previous_action_units
+        effective_delta_a = np.where(
+            np.isclose(delta_a, 0.0, atol=eps, rtol=0.0),
+            c * np.sign(current_action_units),
+            delta_a,
+        )
+        valid = common_valid & np.isfinite(effective_delta_a)
+        components = zeros.copy()
+        components[valid] = (
+            effective_delta_a[valid] * future_avg_returns[valid]
+        )
+        return components
+
+    if key == "v5":
+        weights = np.asarray(ctx.stock_weights_after_trade, dtype=float)
+        valid = common_valid & np.isfinite(weights)
+        components = zeros.copy()
+        components[valid] = weights[valid] * future_avg_returns[valid]
+        return components
+
+    if key == "v6":
+        future_variable = str(
+            params.get("future_variable", "future_direction")
+        ).strip().lower()
+        if future_variable in {"direction", "future_direction"}:
+            future_max_prices = np.nanmax(future_window, axis=0)
+            future_min_prices = np.nanmin(future_window, axis=0)
+            future_max_positions = np.argmax(future_window, axis=0)
+            future_min_positions = np.argmin(future_window, axis=0)
+            direction = np.sign(
+                future_max_positions - future_min_positions
+            ).astype(float)
+            future_signal = (
+                direction
+                * (future_max_prices - future_min_prices)
+                / (current_prices + eps)
+            )
+        elif future_variable in {
+            "future_avg_return",
+            "future_average",
+            "future_avg_returns",
+        }:
+            future_signal = future_avg_returns
+        else:
+            raise ValueError(
+                "reward_v6 parameter 'future_variable' must be one of: "
+                "direction, future_direction, future_avg_return, "
+                "future_average, future_avg_returns."
+            )
+
+        delta_mode = str(
+            params.get("delta_weight_variable", "original_delta_weight")
+        ).strip().lower()
+        if delta_mode in {"same_price_delta_weight"}:
+            if ctx.stock_weights_before_trade is None:
+                raise ValueError(
+                    "stock_weights_before_trade is required when reward v6 "
+                    "uses same_price_delta_weight."
+                )
+            reference_weights = np.asarray(
+                ctx.stock_weights_before_trade, dtype=float
+            )
+        elif delta_mode in {
+            "original_delta_weight",
+            "delta_weight",
+            "previous_day_delta_weight",
+        }:
+            if ctx.previous_stock_weights_after_trade is None:
+                raise ValueError(
+                    "previous_stock_weights_after_trade is required when "
+                    "reward v6 uses original_delta_weight."
+                )
+            reference_weights = np.asarray(
+                ctx.previous_stock_weights_after_trade, dtype=float
+            )
+        else:
+            raise ValueError(
+                "reward_v6 parameter 'delta_weight_variable' must be one of: "
+                "original_delta_weight, delta_weight, previous_day_delta_weight, "
+                "same_price_delta_weight."
+            )
+
+        current_weights = np.asarray(ctx.stock_weights_after_trade, dtype=float)
+        delta_weights = current_weights - reference_weights
+        valid = (
+            common_valid
+            & np.isfinite(future_signal)
+            & np.isfinite(current_weights)
+            & np.isfinite(reference_weights)
+            & np.isfinite(delta_weights)
+        )
+        components = zeros.copy()
+        components[valid] = delta_weights[valid] * future_signal[valid]
+        return components
+
+    raise ValueError(f"Unsupported reward_type for individual components: {reward_type!r}")
 
 
 # Backward-compatible function name for code created before the v5 alias.

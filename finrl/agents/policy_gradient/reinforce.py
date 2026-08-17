@@ -85,6 +85,7 @@ class ReinforceAgent:
             log_std_init=self.log_std_init,
         ).to(self.device)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
+        self.individual_stock_epoch_rewards: list[dict[str, float | int]] = []
 
     def _obs_tensor(self, obs: Any) -> torch.Tensor:
         if isinstance(obs, tuple):
@@ -168,6 +169,48 @@ class ReinforceAgent:
         except (AttributeError, IndexError, TypeError):
             return default
 
+    @staticmethod
+    def _call_env_method(env: Any, name: str) -> Any:
+        """Call one method on a normal env or Stable-Baselines3 VecEnv."""
+        try:
+            if hasattr(env, "env_method"):
+                values = env.env_method(name)
+                if values:
+                    return values[0]
+            method = getattr(env, name, None)
+            if callable(method):
+                return method()
+        except (AttributeError, IndexError, TypeError):
+            return None
+        return None
+
+    def _record_individual_stock_epoch_rewards(self, env: Any, epoch: int) -> None:
+        """Store each stock's mean daily reward contribution for one full epoch."""
+        reward_components = self._call_env_method(
+            env, "save_last_episode_reward_components_memory"
+        )
+        if not isinstance(reward_components, pd.DataFrame) or reward_components.empty:
+            reward_components = self._call_env_method(env, "save_reward_components_memory")
+        if not isinstance(reward_components, pd.DataFrame) or reward_components.empty:
+            return
+
+        stock_columns = [column for column in reward_components.columns if column != "date"]
+        train_trading_days = len(reward_components)
+        if not stock_columns or train_trading_days <= 0:
+            return
+
+        row: dict[str, float | int] = {
+            "epoch": int(epoch),
+            "train_trading_days": int(train_trading_days),
+        }
+        for ticker in stock_columns:
+            daily_contributions = pd.to_numeric(
+                reward_components[ticker], errors="coerce"
+            ).fillna(0.0)
+            row[str(ticker)] = float(daily_contributions.sum() / train_trading_days)
+
+        self.individual_stock_epoch_rewards.append(row)
+
     def _policy_std_mean(self) -> float:
         """Return the mean standard deviation of the current Gaussian policy."""
         with torch.no_grad():
@@ -240,6 +283,7 @@ class ReinforceAgent:
         eval_interval: int = 5,
     ) -> "ReinforceAgent":
         progress_rows: list[dict[str, float]] = []
+        self.individual_stock_epoch_rewards = []
         total_steps = 0
         episode = 0
         eval_interval = max(1, int(eval_interval))
@@ -295,6 +339,7 @@ class ReinforceAgent:
             self.optimizer.step()
 
             episode += 1
+            self._record_individual_stock_epoch_rewards(env, episode)
             episode_reward = float(np.sum(rewards))
             episode_average_reward = float(np.mean(rewards))
 

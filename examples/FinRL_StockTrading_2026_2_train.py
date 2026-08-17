@@ -96,9 +96,9 @@ def get_reward_scaling(reward_type: str) -> float:
 REWARD_SCALING = get_reward_scaling(REWARD_TYPE)
 
 REWARD_DISPLAY_NAMES = {
-    "v0": "original_reward",
-    "original": "original_reward",
-    "finrl_original": "original_reward",
+    "v0": "FinRL_reward",
+    "original": "FinRL_reward",
+    "finrl_original": "FinRL_reward",
     "v1": "buy_low_sell_high_reward",
     "our_reward_v1": "buy_low_sell_high_reward",
     "v2": "future_day_reward",
@@ -193,6 +193,14 @@ def set_axis_labels_horizontal(ax, xlabel: str | None = None, ylabel: str | None
         ax.set_xlabel(xlabel, rotation=0)
     if ylabel is not None:
         ax.set_ylabel(ylabel)
+
+
+def safe_filename(value: str) -> str:
+    text = "".join(
+        character if character.isalnum() or character in {"-", "_", "."} else "_"
+        for character in str(value)
+    )
+    return text.strip("_") or "stock"
 
 
 TRAIN_TERMINAL_SKIP_DAYS = get_future_reward_train_skip_days(REWARD_TYPE, REWARD_PARAMS)
@@ -401,6 +409,88 @@ def save_sb3_training_reward_curve(agent_name: str) -> None:
     print(f"Training reward plot saved to {png_path}")
 
 
+def save_reinforce_individual_stock_train_reward_curves(model: ReinforceAgent) -> None:
+    """Save one epoch-level training reward curve for each stock.
+
+    For every complete REINFORCE epoch, the environment already records one
+    unscaled daily reward contribution per stock. The y value saved here is:
+
+        stock_epoch_reward = sum(daily reward contribution) / train trading days
+    """
+    epoch_rows = getattr(model, "individual_stock_epoch_rewards", None)
+    if not epoch_rows:
+        print("No REINFORCE individual-stock epoch rewards were recorded.")
+        return
+
+    epoch_df = pd.DataFrame(epoch_rows)
+    if epoch_df.empty or "epoch" not in epoch_df.columns:
+        print("REINFORCE individual-stock epoch reward data is empty.")
+        return
+
+    metadata_columns = {"epoch", "train_trading_days"}
+    stock_columns = [
+        column for column in epoch_df.columns if column not in metadata_columns
+    ]
+    if not stock_columns:
+        print("No stock columns found in REINFORCE individual-stock epoch rewards.")
+        return
+
+    out_dir = OUTPUT_DIR / "individual_stock_train_reward_curve"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source_rows: list[dict[str, object]] = []
+
+    for ticker in stock_columns:
+        source_df = epoch_df[["epoch", "train_trading_days", ticker]].copy()
+        source_df = source_df.rename(columns={ticker: "stock_epoch_reward"})
+        source_df["epoch"] = pd.to_numeric(source_df["epoch"], errors="coerce")
+        source_df["train_trading_days"] = pd.to_numeric(
+            source_df["train_trading_days"], errors="coerce"
+        )
+        source_df["stock_epoch_reward"] = pd.to_numeric(
+            source_df["stock_epoch_reward"], errors="coerce"
+        )
+        source_df = source_df.dropna(subset=["epoch", "stock_epoch_reward"]).copy()
+        if source_df.empty:
+            continue
+
+        source_df["epoch"] = source_df["epoch"].astype(int)
+        csv_path = out_dir / f"{safe_filename(ticker)}_reward_curve.csv"
+        png_path = out_dir / f"{safe_filename(ticker)}_reward_curve.png"
+        source_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+        fig, ax = plt.subplots(figsize=(15, 5))
+        ax.plot(
+            source_df["epoch"],
+            source_df["stock_epoch_reward"],
+            linewidth=1.8,
+        )
+        ax.set_title(
+            f"{ticker} Individual Train Reward Curve ({reward_display_name(REWARD_TYPE)})"
+        )
+        set_axis_labels_horizontal(ax, "Epoch", "Reward", ylabel_pad=65)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(png_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        source_rows.append(
+            {
+                "image": png_path.name,
+                "image_path": str(png_path),
+                "source_role": "reinforce_individual_stock_train_reward",
+                "source_csv": str(csv_path),
+                "output_csv": str(csv_path),
+                "stage": "train_times",
+                "reward_type": REWARD_TYPE,
+                "random_seed": RANDOM_SEED,
+                "training_data": str(TRAIN_DATA_PATH),
+            }
+        )
+
+    save_image_source_manifest(source_rows)
+    print(f"Individual stock train reward curves saved to {out_dir}")
+
+
 
 def save_reinforce_diagnostics() -> None:
     """Copy REINFORCE training and reward-v4 diagnostics to the times folder."""
@@ -483,55 +573,56 @@ def save_reinforce_deterministic_evaluation_curve() -> None:
     suffix = f"reinforce_{REWARD_TYPE}_seed_{RANDOM_SEED}_{today_str}"
     csv_path = OUTPUT_DIR / f"deterministic_eval_curve_{suffix}.csv"
     canonical_csv_path = OUTPUT_DIR / "deterministic_eval_curve.csv"
-    png_path = OUTPUT_DIR / f"deterministic_eval_curve_{suffix}.png"
-    canonical_png_path = OUTPUT_DIR / "deterministic_eval_curve.png"
-
     curve.to_csv(csv_path, index=False, encoding="utf-8-sig")
     curve.to_csv(canonical_csv_path, index=False, encoding="utf-8-sig")
 
-    fig, ax = plt.subplots(figsize=(15, 5))
-    ax.plot(curve["epoch"], curve["deterministic_reward"], linewidth=2.0)
-    ax.set_title(
-        "Deterministic Evaluation Reward Curve - REINFORCE "
-        f"({reward_display_name(REWARD_TYPE)})"
-    )
-    set_axis_labels_horizontal(ax, "epoch", "deterministic reward", ylabel_pad=75)
-    ax.grid(True, alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(png_path, dpi=150, bbox_inches="tight")
-    fig.savefig(canonical_png_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-    save_image_source_manifest(
-        [
-            {
-                "image": png_path.name,
-                "image_path": str(png_path),
-                "source_role": "reinforce_periodic_deterministic_evaluation",
-                "source_csv": str(progress_path),
-                "output_csv": str(csv_path),
-                "stage": "train_times_diagnostic_eval",
-                "reward_type": REWARD_TYPE,
-                "random_seed": RANDOM_SEED,
-                "training_data": str(TRAIN_DATA_PATH),
-                "eval_interval_epochs": REINFORCE_EVAL_INTERVAL,
-            },
-            {
-                "image": canonical_png_path.name,
-                "image_path": str(canonical_png_path),
-                "source_role": "reinforce_periodic_deterministic_evaluation",
-                "source_csv": str(progress_path),
-                "output_csv": str(canonical_csv_path),
-                "stage": "train_times_diagnostic_eval",
-                "reward_type": REWARD_TYPE,
-                "random_seed": RANDOM_SEED,
-                "training_data": str(TRAIN_DATA_PATH),
-                "eval_interval_epochs": REINFORCE_EVAL_INTERVAL,
-            },
-        ]
-    )
+    # 2026-08-08: deterministic_eval_curve 圖片暫停產出。
+    # 保留 deterministic evaluation CSV，之後需要時可直接恢復繪圖程式。
+    # png_path = OUTPUT_DIR / f"deterministic_eval_curve_{suffix}.png"
+    # canonical_png_path = OUTPUT_DIR / "deterministic_eval_curve.png"
+    #
+    # fig, ax = plt.subplots(figsize=(15, 5))
+    # ax.plot(curve["epoch"], curve["deterministic_reward"], linewidth=2.0)
+    # ax.set_title(
+    #     "Deterministic Evaluation Reward Curve - REINFORCE "
+    #     f"({reward_display_name(REWARD_TYPE)})"
+    # )
+    # set_axis_labels_horizontal(ax, "epoch", "deterministic reward", ylabel_pad=75)
+    # ax.grid(True, alpha=0.25)
+    # fig.tight_layout()
+    # fig.savefig(png_path, dpi=150, bbox_inches="tight")
+    # fig.savefig(canonical_png_path, dpi=150, bbox_inches="tight")
+    # plt.close(fig)
+    #
+    # save_image_source_manifest(
+    #     [
+    #         {
+    #             "image": png_path.name,
+    #             "image_path": str(png_path),
+    #             "source_role": "reinforce_periodic_deterministic_evaluation",
+    #             "source_csv": str(progress_path),
+    #             "output_csv": str(csv_path),
+    #             "stage": "train_times_diagnostic_eval",
+    #             "reward_type": REWARD_TYPE,
+    #             "random_seed": RANDOM_SEED,
+    #             "training_data": str(TRAIN_DATA_PATH),
+    #             "eval_interval_epochs": REINFORCE_EVAL_INTERVAL,
+    #         },
+    #         {
+    #             "image": canonical_png_path.name,
+    #             "image_path": str(canonical_png_path),
+    #             "source_role": "reinforce_periodic_deterministic_evaluation",
+    #             "source_csv": str(progress_path),
+    #             "output_csv": str(canonical_csv_path),
+    #             "stage": "train_times_diagnostic_eval",
+    #             "reward_type": REWARD_TYPE,
+    #             "random_seed": RANDOM_SEED,
+    #             "training_data": str(TRAIN_DATA_PATH),
+    #             "eval_interval_epochs": REINFORCE_EVAL_INTERVAL,
+    #         },
+    #     ]
+    # )
     print(f"Deterministic evaluation curve saved to {csv_path}")
-    print(f"Deterministic evaluation plot saved to {png_path}")
 
 
 def plot_train_eval_reward_curve(rewards, plot_path, agent_name):
@@ -619,7 +710,8 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
 
     reward_path = OUTPUT_DIR / f"train_eval_reward_by_step_{suffix}.csv"
     weights_path = OUTPUT_DIR / f"train_eval_post_trade_weights_{suffix}.csv"
-    plot_path = OUTPUT_DIR / f"train_eval_cumulative_reward_by_step_{suffix}.png"
+    # 2026-08-08: train_eval_cumulative_reward_by_step 圖片暫停產出。
+    # plot_path = OUTPUT_DIR / f"train_eval_cumulative_reward_by_step_{suffix}.png"
     rewards.to_csv(reward_path, index=False, encoding="utf-8-sig")
     weights.to_csv(weights_path, index=False, encoding="utf-8-sig")
     if agent_name.lower() == PRIMARY_AGENT_NAME:
@@ -629,11 +721,10 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
             index=False,
             encoding="utf-8-sig",
         )
-    plot_train_eval_reward_curve(rewards, plot_path, agent_name)
+    # plot_train_eval_reward_curve(rewards, plot_path, agent_name)
 
     print(f"Train evaluation reward by step saved to {reward_path}")
     print(f"Train evaluation post-trade weights saved to {weights_path}")
-    print(f"Train evaluation reward plot saved to {plot_path}")
 
 # %% Part 2. Build environment
 
@@ -810,6 +901,7 @@ if if_using_reinforce:
     trained_reinforce.save(TRAINED_MODEL_DIR + "/agent_reinforce")
     save_reinforce_diagnostics()
     save_sb3_training_reward_curve("reinforce")
+    save_reinforce_individual_stock_train_reward_curves(trained_reinforce)
     save_reinforce_deterministic_evaluation_curve()
     evaluate_on_train_and_save_reward_curve(trained_reinforce, "reinforce")
 

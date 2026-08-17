@@ -13,6 +13,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from finrl.meta.env_stock_trading.reward_functions import (
     RewardContext,
+    calculate_individual_reward_components,
     calculate_reward,
     calculate_stock_weights_after_trade,
 )
@@ -119,6 +120,9 @@ class StockTradingEnv(gym.Env):
             )
         ]  # the initial total asset is calculated by cash + sum (num_share_stock_i * price_stock_i)
         self.rewards_memory = []
+        self.reward_components_memory = []
+        self.last_episode_reward_components_memory = []
+        self.last_episode_reward_component_dates = []
         self.actions_memory = []
         self.agent_actions_memory = []
         self.state_memory = (
@@ -255,6 +259,16 @@ class StockTradingEnv(gym.Env):
     def step(self, actions):
         self.terminal = self.day >= self.terminal_day
         if self.terminal:
+            # VecEnv resets the environment immediately after done=True. Keep a
+            # snapshot so REINFORCE can aggregate the just-finished full epoch
+            # after env.step() returns without losing the per-stock daily data.
+            self.last_episode_reward_components_memory = [
+                np.asarray(row, dtype=float).copy()
+                for row in self.reward_components_memory
+            ]
+            self.last_episode_reward_component_dates = list(
+                self.date_memory[: len(self.reward_components_memory)]
+            )
             # print(f"Episode: {self.episode}")
             if self.make_plots:
                 self._make_plot()
@@ -487,7 +501,15 @@ class StockTradingEnv(gym.Env):
                     previous_stock_weights_after_trade
                 ),
                 stock_weights_before_trade=stock_weights_before_trade,
+                executed_actions=actions.copy(),
             )
+
+            reward_components = calculate_individual_reward_components(
+                reward_type=self.reward_type,
+                ctx=reward_context,
+                params=self.reward_params,
+            )
+            self.reward_components_memory.append(reward_components.copy())
 
             self.reward = calculate_reward(
                 reward_type=self.reward_type,
@@ -545,6 +567,7 @@ class StockTradingEnv(gym.Env):
         self.terminal = False
         # self.iteration=self.iteration
         self.rewards_memory = []
+        self.reward_components_memory = []
         self.actions_memory = []
         self.agent_actions_memory = []
         self.state_memory = []
@@ -735,6 +758,29 @@ class StockTradingEnv(gym.Env):
         ]
         columns = metadata_columns + self._get_tic_list()
         return pd.DataFrame(self.post_trade_weights_memory).reindex(columns=columns)
+
+    def save_reward_components_memory(self):
+        """Return the per-stock contribution to each unscaled step reward."""
+        date_list = self.date_memory[: len(self.reward_components_memory)]
+        df_components = pd.DataFrame(
+            self.reward_components_memory,
+            columns=self._get_tic_list(),
+        )
+        df_components.insert(0, "date", date_list)
+        return df_components
+
+    def save_last_episode_reward_components_memory(self):
+        """Return the completed episode contribution snapshot kept across VecEnv reset."""
+        df_components = pd.DataFrame(
+            self.last_episode_reward_components_memory,
+            columns=self._get_tic_list(),
+        )
+        df_components.insert(
+            0,
+            "date",
+            self.last_episode_reward_component_dates,
+        )
+        return df_components
 
     def save_reward_memory(self):
         # rewards_memory stores unscaled rewards before reward_scaling.

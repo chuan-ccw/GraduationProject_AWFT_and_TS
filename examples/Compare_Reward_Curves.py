@@ -30,10 +30,10 @@ EXPERIMENT_ROOT = os.environ.get(
     "EXPERIMENT_ROOT",
     r"C:\Users\User\Desktop\GraduationProject\Experence_result",
 )
-SOURCE_A_FOLDER = os.environ.get("REWARD_CURVE_SOURCE_A", "rolling_2018-2025_train3y_test1y_shift1y_20260719_reinforce")
-SOURCE_B_FOLDER = os.environ.get("REWARD_CURVE_SOURCE_B", "rolling_2018-2025_train3y_test1y_shift1y_20260805_005125_reinforce")
+SOURCE_A_FOLDER = os.environ.get("REWARD_CURVE_SOURCE_A", "rolling_2018-2025_train3y_test1y_shift1y_20260812_134420_reinforce")
+SOURCE_B_FOLDER = os.environ.get("REWARD_CURVE_SOURCE_B", "rolling_2018-2025_train3y_test1y_shift1y_20260811_142912_reinforce")
 WINDOW_FILTER = os.environ.get("REWARD_CURVE_WINDOW_FILTER", "")
-COMPARE_NAME = os.environ.get("REWARD_CURVE_COMPARE_NAME", "v0_vs_v6(n=60)")
+COMPARE_NAME = os.environ.get("REWARD_CURVE_COMPARE_NAME", "v3_vs_v6(n=60)_2")
 
 REWARD_DISPLAY_NAMES = {
     "v0": "original_reward",

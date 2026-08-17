@@ -11,6 +11,7 @@ import time
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import BoundaryNorm, ListedColormap
 import numpy as np
 import pandas as pd
 from stable_baselines3.common.utils import set_random_seed
@@ -20,6 +21,10 @@ from typing import Any
 
 from finrl import config
 from result_manager import append_compare_experiment_record, append_reward_experiment_record
+from future_ranking_evaluation import (
+    build_times_future_ranking_evaluation,
+    build_window_future_ranking_summary,
+)
 
 
 # =====================================================
@@ -61,7 +66,7 @@ REWARD_PARAMS_BY_TYPE = {
         "price_col": "close",
     },
     "v3": {
-        "n_future": 5,
+        "n_future": 60,
         "price_col": "close",
     },
     "v4": {
@@ -83,10 +88,21 @@ REWARD_PARAMS_BY_TYPE = {
 
 REWARD_PARAMS = REWARD_PARAMS_BY_TYPE.get(REWARD_TYPE, {})
 
+# Future Ranking is an objective evaluation target and must not depend on the
+# reward used to train the agent. Keep one fixed definition for every reward.
+FUTURE_RANKING_PARAMS = {
+    "n_future": 60,
+    "price_col": "close",
+    "future_metric": "future_avg_return",
+}
+
 REWARD_DISPLAY_NAMES = {
-    "v0": "original_reward",
-    "original": "original_reward",
-    "finrl_original": "original_reward",
+    "v0": "FinRL_reward",
+    "reward_v0": "FinRL_reward",
+    "original": "FinRL_reward",
+    "original_reward": "FinRL_reward",
+    "finrl_original": "FinRL_reward",
+    "finrl_original_reward": "FinRL_reward",
     "v1": "buy_low_sell_high_reward",
     "our_reward_v1": "buy_low_sell_high_reward",
     "v2": "future_day_reward",
@@ -180,6 +196,14 @@ def keep_valid_date_rows(df: pd.DataFrame) -> pd.DataFrame:
     out["date"] = normalize_date_column(out["date"])
     out = out[out["date"].notna()].copy()
     return out.reset_index(drop=True)
+
+
+def safe_filename(value: str) -> str:
+    text = "".join(
+        character if character.isalnum() or character in {"-", "_", "."} else "_"
+        for character in str(value)
+    )
+    return text.strip("_") or "stock"
 
 
 def build_dji_baseline(trade_dates, initial_amount: float = 1_000_000.0) -> pd.Series:
@@ -645,6 +669,7 @@ def base_experiment_config() -> dict[str, Any]:
     return {
         "reward_type": REWARD_TYPE,
         "reward_params": REWARD_PARAMS,
+        "future_ranking_params": FUTURE_RANKING_PARAMS,
         "small_diagnostic_experiment": SMALL_DIAGNOSTIC_EXPERIMENT,
         "diagnostic_window_count": DIAGNOSTIC_WINDOW_COUNT,
         "rolling_window_mode": ROLLING_WINDOW_MODE,
@@ -709,6 +734,9 @@ def build_child_environment(
 
     env["REWARD_TYPE"] = REWARD_TYPE
     env["REWARD_PARAMS"] = json.dumps(REWARD_PARAMS, ensure_ascii=False)
+    env["FUTURE_RANKING_PARAMS"] = json.dumps(
+        FUTURE_RANKING_PARAMS, ensure_ascii=False
+    )
 
     env["TRAIN_START_DATE"] = train_start_date
     env["TRAIN_END_DATE"] = train_end_date
@@ -1603,6 +1631,8 @@ def _run_continuous_window_agent(
     pd.DataFrame,
     pd.DataFrame,
     pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
     float,
     dict[str, float],
     list[str],
@@ -1675,8 +1705,13 @@ def _run_continuous_window_agent(
             break
 
     account_value = test_env.env_method(method_name="save_asset_memory")[0]
+    actions = test_env.env_method(method_name="save_action_memory")[0]
     holdings = test_env.env_method(method_name="save_holdings_memory")[0]
     weights = test_env.env_method(method_name="save_weight_memory")[0]
+    rewards = test_env.env_method(method_name="save_reward_memory")[0]
+    reward_components = test_env.env_method(
+        method_name="save_reward_components_memory"
+    )[0]
 
     if holdings.empty:
         raise ValueError(f"{trade_data_path} 產生的 holdings 記錄是空的。")
@@ -1688,7 +1723,411 @@ def _run_continuous_window_agent(
         for tic in tic_order
         if tic in holdings.columns
     }
-    return account_value, holdings, weights, next_cash, next_shares_by_tic, tic_order
+    return (
+        account_value,
+        actions,
+        holdings,
+        weights,
+        rewards,
+        reward_components,
+        next_cash,
+        next_shares_by_tic,
+        tic_order,
+    )
+
+
+def _load_window_price_table(
+    trade_data_path: Path,
+    target_dates: pd.Series | list[str],
+    price_col: str,
+    stock_columns: list[str] | None = None,
+) -> pd.DataFrame:
+    trade = pd.read_csv(trade_data_path)
+    if trade.empty or "date" not in trade.columns or "tic" not in trade.columns:
+        return pd.DataFrame()
+
+    if price_col not in trade.columns:
+        price_col = "close" if "close" in trade.columns else price_col
+    if price_col not in trade.columns:
+        return pd.DataFrame()
+
+    dates = pd.Series(target_dates).astype(str).str[:10]
+    price_data = trade[["date", "tic", price_col]].copy()
+    price_data["date"] = pd.to_datetime(price_data["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    price_data[price_col] = pd.to_numeric(price_data[price_col], errors="coerce")
+    price_pivot = price_data.pivot_table(index="date", columns="tic", values=price_col, aggfunc="last")
+
+    if stock_columns is None:
+        stock_columns = [str(column) for column in price_pivot.columns]
+
+    aligned = price_pivot.reindex(dates).reindex(columns=stock_columns)
+    aligned = aligned.reset_index().rename(columns={"index": "date"})
+    aligned.insert(0, "date", dates.to_numpy()) if "date" not in aligned.columns else None
+    aligned["date"] = dates.to_numpy()
+    return aligned.reset_index(drop=True)
+
+
+def _save_individual_stock_reward_curves(
+    reward_components: pd.DataFrame,
+    stock_columns: list[str],
+    out_dir: Path,
+) -> None:
+    if reward_components is None or reward_components.empty:
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dates = reward_components["date"].tolist()
+    for ticker in stock_columns:
+        ticker_series = pd.to_numeric(reward_components[ticker], errors="coerce").fillna(0.0)
+        cumulative = ticker_series.cumsum()
+        source_df = pd.DataFrame({
+            "date": dates,
+            "reward_component": ticker_series,
+            "cumulative_reward": cumulative,
+        })
+        csv_path = out_dir / f"{safe_filename(ticker)}_reward_curve.csv"
+        png_path = out_dir / f"{safe_filename(ticker)}_reward_curve.png"
+        source_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+        fig, ax = plt.subplots(figsize=(15, 5))
+        ax.plot(np.arange(len(source_df)), source_df["reward_component"], linewidth=1.8)
+        set_month_xticklabels(ax, dates, max_xticks=12)
+        ax.set_title(
+            f"{ticker} Individual Reward Curve ({reward_display_name(REWARD_TYPE)})"
+        )
+        set_axis_labels_horizontal(ax, "Date", "Reward", ylabel_pad=65)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(png_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+
+def _compute_individual_stock_roi(
+    actions: pd.DataFrame,
+    prices: pd.DataFrame,
+    stock_columns: list[str],
+    buy_cost_pct: float = 0.001,
+    sell_cost_pct: float = 0.001,
+) -> dict[str, pd.DataFrame]:
+    roi_results: dict[str, pd.DataFrame] = {}
+    if actions.empty or prices.empty:
+        return roi_results
+
+    dates = actions["date"].astype(str).tolist()
+    for ticker in stock_columns:
+        action_values = pd.to_numeric(actions[ticker], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        close_prices = pd.to_numeric(prices[ticker], errors="coerce").to_numpy(dtype=float)
+
+        invested_cost = 0.0
+        sale_proceeds = 0.0
+        shares_held = 0.0
+        rows: list[dict[str, float | str]] = []
+        for row_index, (action_value, close_price) in enumerate(zip(action_values, close_prices)):
+            if np.isfinite(close_price):
+                if action_value > 0:
+                    invested_cost += float(action_value * close_price * (1.0 + buy_cost_pct))
+                    shares_held += float(action_value)
+                elif action_value < 0:
+                    sold_shares = float(-action_value)
+                    sale_proceeds += sold_shares * close_price * (1.0 - sell_cost_pct)
+                    shares_held += float(action_value)
+
+            market_value = float(shares_held * close_price) if np.isfinite(close_price) else np.nan
+            net_pnl = sale_proceeds + market_value - invested_cost if np.isfinite(market_value) else np.nan
+            roi_pct = net_pnl / invested_cost * 100.0 if invested_cost > 1e-12 and np.isfinite(net_pnl) else np.nan
+            rows.append(
+                {
+                    "date": dates[row_index],
+                    "close_price": close_price,
+                    "executed_action": action_value,
+                    "shares_held": shares_held,
+                    "total_invested_cost": invested_cost,
+                    "total_sell_proceeds": sale_proceeds,
+                    "market_value": market_value,
+                    "net_pnl": net_pnl,
+                    "roi_pct": roi_pct,
+                }
+            )
+        roi_results[ticker] = pd.DataFrame(rows)
+    return roi_results
+
+
+def _save_individual_stock_roi_plots(
+    roi_results: dict[str, pd.DataFrame],
+    out_dir: Path,
+) -> None:
+    if not roi_results:
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for ticker, source_df in roi_results.items():
+        csv_path = out_dir / f"{safe_filename(ticker)}_roi.csv"
+        png_path = out_dir / f"{safe_filename(ticker)}_roi.png"
+        source_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+        fig, ax = plt.subplots(figsize=(15, 5))
+        roi_series = pd.to_numeric(source_df["roi_pct"], errors="coerce")
+        net_pnl_series = pd.to_numeric(source_df["net_pnl"], errors="coerce")
+        final_roi = roi_series.dropna().iloc[-1] if roi_series.notna().any() else np.nan
+        final_net_pnl = net_pnl_series.dropna().iloc[-1] if net_pnl_series.notna().any() else np.nan
+        legend_label = (
+            f"Final ROI: {final_roi:.2f}% | P/L: {final_net_pnl:,.2f}"
+            if np.isfinite(final_roi) and np.isfinite(final_net_pnl)
+            else "ROI"
+        )
+
+        ax.plot(
+            np.arange(len(source_df)),
+            roi_series,
+            linewidth=1.8,
+            label=legend_label,
+        )
+        ax.axhline(0.0, color="gray", linestyle="--", linewidth=1.1)
+        set_month_xticklabels(ax, source_df["date"].tolist(), max_xticks=12)
+        ax.set_title(f"{ticker} Individual ROI - {reward_display_name(REWARD_TYPE)}")
+        set_axis_labels_horizontal(ax, "Date", "ROI (%)", ylabel_pad=65)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(png_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+
+def _plot_stock_turnover_heatmap(
+    actions: pd.DataFrame,
+    holdings: pd.DataFrame,
+    stock_columns: list[str],
+    out_path: Path,
+    title_suffix: str,
+) -> None:
+    if actions.empty or holdings.empty or not stock_columns:
+        return
+
+    # actions comes from Annual Reset save_action_memory(): final executed shares.
+    # > 0 = Buy, < 0 = Sell, == 0 = no trade.
+    final_action_values = actions[stock_columns].apply(
+        pd.to_numeric, errors="coerce"
+    ).fillna(0.0)
+    final_action_array = final_action_values.to_numpy(dtype=float)
+    holding_values = holdings[stock_columns].apply(
+        pd.to_numeric, errors="coerce"
+    ).fillna(0.0).clip(lower=0.0)
+    holding_array = holding_values.to_numpy(dtype=float)
+
+    max_holding = float(np.nanmax(holding_array)) if holding_array.size else 0.0
+    if not np.isfinite(max_holding) or max_holding <= 0.0:
+        holding_strength = np.zeros_like(holding_array, dtype=float)
+    else:
+        holding_strength = np.clip(holding_array / max_holding, 0.0, 1.0)
+
+    # Keep every executed trade visible while still using holding shares to
+    # control color depth: fewer shares = lighter, more shares = darker.
+    visible_strength = 0.35 + 0.65 * holding_strength
+    image_values = np.ones((*final_action_array.shape, 4), dtype=float)
+    buy_rgb = np.array([1.0, 77 / 255.0, 79 / 255.0])
+    sell_rgb = np.array([57 / 255.0, 211 / 255.0, 83 / 255.0])
+
+    for row_index, col_index in np.argwhere(final_action_array > 0):
+        strength = visible_strength[row_index, col_index]
+        image_values[row_index, col_index, :3] = 1.0 - strength * (1.0 - buy_rgb)
+    for row_index, col_index in np.argwhere(final_action_array < 0):
+        strength = visible_strength[row_index, col_index]
+        image_values[row_index, col_index, :3] = 1.0 - strength * (1.0 - sell_rgb)
+
+    dates = actions["date"].tolist()
+
+    fig_height = max(8, 0.24 * max(len(stock_columns), 1) + 1.8)
+    fig, ax = plt.subplots(figsize=(18, fig_height))
+    ax.imshow(
+        np.transpose(image_values, (1, 0, 2)),
+        aspect="auto",
+        interpolation="nearest",
+    )
+    ax.set_yticks(np.arange(len(stock_columns)))
+    ax.set_yticklabels(stock_columns)
+    set_month_xticklabels(ax, dates, max_xticks=12)
+    ax.set_title(f"Stock Turnover Heatmap{title_suffix} - {reward_display_name(REWARD_TYPE)}")
+    set_axis_labels_horizontal(ax, "Date", "Stocks")
+
+    # Keep the old Buy / Hold / Sell vertical key on the right. The heatmap
+    # itself still uses color depth to show how many shares are held.
+    signal_cmap = ListedColormap(["#39d353", "#ffffff", "#ff4d4f"])
+    signal_norm = BoundaryNorm([-1.5, -0.5, 0.5, 1.5], signal_cmap.N)
+    signal_mappable = plt.cm.ScalarMappable(norm=signal_norm, cmap=signal_cmap)
+    signal_mappable.set_array([])
+    colorbar = fig.colorbar(
+        signal_mappable,
+        ax=ax,
+        orientation="vertical",
+        ticks=[-1, 0, 1],
+        fraction=0.025,
+        pad=0.02,
+    )
+    colorbar.ax.set_yticklabels(["Sell", "Hold", "Buy"])
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _read_annual_reset_result_csv(path: Path) -> pd.DataFrame:
+    """Load one Annual Reset diagnostic CSV and normalize its date column."""
+    df = pd.read_csv(path)
+    if df.empty:
+        return df
+
+    if "date" not in df.columns:
+        first_column = df.columns[0]
+        df = df.rename(columns={first_column: "date"})
+
+    df["date"] = normalize_date_column(df["date"].astype(str))
+    df = df[df["date"].notna()].copy()
+    return df.reset_index(drop=True)
+
+
+def _latest_matching_file(directory: Path, pattern: str) -> Path | None:
+    candidates = list(directory.glob(pattern))
+    return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
+
+
+def build_annual_reset_stock_outputs(
+    experiment_dir: Path,
+    agent_name: str,
+    reward_type: str,
+) -> None:
+    """Create per-stock diagnostics from this times' Annual Reset backtest only."""
+    actions_path = _latest_matching_file(
+        experiment_dir,
+        f"actions_{agent_name}_{reward_type}_*.csv",
+    )
+    weights_path = _latest_matching_file(
+        experiment_dir,
+        f"post_trade_weights_{agent_name}_{reward_type}_*.csv",
+    )
+    holdings_path = _latest_matching_file(
+        experiment_dir,
+        f"holdings_{agent_name}_{reward_type}_*.csv",
+    )
+    reward_components_path = _latest_matching_file(
+        experiment_dir,
+        f"reward_components_{agent_name}_{reward_type}_*.csv",
+    )
+    trade_data_path = experiment_dir / "data" / "trade_data.csv"
+
+    required_paths = {
+        "actions": actions_path,
+        "weights": weights_path,
+        "holdings": holdings_path,
+        "reward_components": reward_components_path,
+        "trade_data": trade_data_path if trade_data_path.exists() else None,
+    }
+    missing = [name for name, path in required_paths.items() if path is None]
+    if missing:
+        print(
+            "Annual Reset individual stock outputs skipped: missing "
+            + ", ".join(missing)
+            + f" in {experiment_dir}"
+        )
+        return
+
+    actions = _read_annual_reset_result_csv(actions_path)
+    weights = _read_annual_reset_result_csv(weights_path)
+    holdings = _read_annual_reset_result_csv(holdings_path)
+    reward_components = _read_annual_reset_result_csv(reward_components_path)
+    if actions.empty or weights.empty or holdings.empty or reward_components.empty:
+        print(f"Annual Reset individual stock outputs skipped: empty source in {experiment_dir}")
+        return
+
+    weight_metadata = {
+        "date",
+        "cash_after_trade",
+        "total_asset_after_trade",
+        "cash_weight",
+        "stock_weight_sum",
+        "total_weight",
+    }
+    stock_columns = [
+        column
+        for column in actions.columns
+        if column != "date"
+        and column in weights.columns
+        and column in reward_components.columns
+        and column not in weight_metadata
+    ]
+    if not stock_columns:
+        print(f"Annual Reset individual stock outputs skipped: no stock columns in {experiment_dir}")
+        return
+
+    nonzero_stock_columns = [
+        column
+        for column in stock_columns
+        if (pd.to_numeric(weights[column], errors="coerce").fillna(0.0) > 1e-12).any()
+    ]
+    if not nonzero_stock_columns:
+        print(f"Annual Reset individual stock outputs skipped: no weight > 0 in {experiment_dir}")
+        return
+
+    prices = _load_window_price_table(
+        trade_data_path,
+        actions["date"],
+        "close",
+        stock_columns=stock_columns,
+    )
+    if prices.empty:
+        print(f"Annual Reset individual stock outputs skipped: no prices in {experiment_dir}")
+        return
+
+    reward_components = pd.DataFrame({"date": actions["date"]}).merge(
+        reward_components[["date"] + stock_columns],
+        on="date",
+        how="left",
+    )
+    holdings = pd.DataFrame({"date": actions["date"]}).merge(
+        holdings[["date"] + stock_columns],
+        on="date",
+        how="left",
+    )
+    for column in stock_columns:
+        reward_components[column] = pd.to_numeric(
+            reward_components[column], errors="coerce"
+        ).fillna(0.0)
+        holdings[column] = pd.to_numeric(
+            holdings[column], errors="coerce"
+        ).fillna(0.0)
+
+    _save_individual_stock_reward_curves(
+        reward_components[["date"] + nonzero_stock_columns],
+        nonzero_stock_columns,
+        experiment_dir / "individual_stock_test_reward_curve",
+    )
+
+    roi_results = _compute_individual_stock_roi(
+        actions[["date"] + stock_columns],
+        prices[["date"] + stock_columns],
+        nonzero_stock_columns,
+        buy_cost_pct=0.001,
+        sell_cost_pct=0.001,
+    )
+    _save_individual_stock_roi_plots(
+        roi_results,
+        experiment_dir / "individual_stock_ROI",
+    )
+
+    _plot_stock_turnover_heatmap(
+        actions[["date"] + stock_columns],
+        holdings[["date"] + stock_columns],
+        stock_columns,
+        experiment_dir / "stock_turnover_heatmap_all.png",
+        " - All Stocks",
+    )
+    _plot_stock_turnover_heatmap(
+        actions[["date"] + stock_columns],
+        holdings[["date"] + stock_columns],
+        nonzero_stock_columns,
+        experiment_dir / "stock_turnover_heatmap_nonzero.png",
+        " - Nonzero Weight Stocks",
+    )
+
+    print(f"Annual Reset individual stock outputs saved to: {experiment_dir}")
 
 
 def normalize_reward_type_for_continuous(value: str | None) -> str:
@@ -1789,7 +2228,17 @@ def run_continuous_5y_test(
             window_seed = test_seed + int(window["window_id"]) * 1000
 
             try:
-                account_value, holdings, weights, carried_cash, carried_shares_by_tic, tic_order = _run_continuous_window_agent(
+                (
+                    account_value,
+                    actions,
+                    holdings,
+                    weights,
+                    rewards,
+                    reward_components,
+                    carried_cash,
+                    carried_shares_by_tic,
+                    tic_order,
+                ) = _run_continuous_window_agent(
                     trade_data_path=trade_data_path,
                     trained_model_dir=trained_model_dir,
                     carried_cash=carried_cash,
@@ -1836,10 +2285,23 @@ def run_continuous_5y_test(
             account_value["source_model_dir"] = str(trained_model_dir)
             account_frames.append(account_value)
 
+            window_actions_path = times_dir / f"actions_window_{window['window_id']:02d}_{reward_type}.csv"
+            actions.to_csv(window_actions_path, index=True, encoding="utf-8-sig")
             window_holdings_path = times_dir / f"holdings_window_{window['window_id']:02d}_{reward_type}.csv"
             holdings.to_csv(window_holdings_path, index=False, encoding="utf-8-sig")
             window_weights_path = times_dir / f"post_trade_weights_window_{window['window_id']:02d}_{reward_type}.csv"
             weights.to_csv(window_weights_path, index=False, encoding="utf-8-sig")
+            window_rewards_path = times_dir / f"rewards_window_{window['window_id']:02d}_{reward_type}.csv"
+            rewards.to_csv(window_rewards_path, index=False, encoding="utf-8-sig")
+            window_reward_components_path = (
+                times_dir
+                / f"reward_components_window_{window['window_id']:02d}_{reward_type}.csv"
+            )
+            reward_components.to_csv(
+                window_reward_components_path,
+                index=False,
+                encoding="utf-8-sig",
+            )
 
             strategy = pd.to_numeric(account_value["account_value"], errors="coerce").dropna()
             window_summary_rows.append(
@@ -1860,8 +2322,10 @@ def run_continuous_5y_test(
                     "window_return": float(strategy.iloc[-1] / strategy.iloc[0] - 1) if len(strategy) >= 2 and strategy.iloc[0] != 0 else np.nan,
                     "trade_data": str(trade_data_path),
                     "trained_model_dir": str(trained_model_dir),
+                    "actions_csv": str(window_actions_path),
                     "holdings_csv": str(window_holdings_path),
                     "weights_csv": str(window_weights_path),
+                    "rewards_csv": str(window_rewards_path),
                     "predict_deterministic": TEST_PREDICT_DETERMINISTIC,
                 }
             )
@@ -1876,8 +2340,10 @@ def run_continuous_5y_test(
                     "window_folder": window_dir.name,
                     "trade_data": str(trade_data_path),
                     "trained_model_dir": str(trained_model_dir),
+                    "actions_csv": str(window_actions_path),
                     "holdings_csv": str(window_holdings_path),
                     "weights_csv": str(window_weights_path),
+                    "rewards_csv": str(window_rewards_path),
                     "ticker_order": ",".join(tic_order),
                     "predict_deterministic": TEST_PREDICT_DETERMINISTIC,
                 }
@@ -2324,6 +2790,20 @@ if __name__ == "__main__":
                         times_index=times_index,
                     )
 
+                if RUN_BACKTEST:
+                    build_annual_reset_stock_outputs(
+                        experiment_dir=experiment_dir,
+                        agent_name=primary_agent_name(),
+                        reward_type=REWARD_TYPE,
+                    )
+                    build_times_future_ranking_evaluation(
+                        window_dir=window_dir,
+                        experiment_dir=experiment_dir,
+                        agent_name=primary_agent_name(),
+                        reward_type=REWARD_TYPE,
+                        reward_params=FUTURE_RANKING_PARAMS,
+                    )
+
                 backtest_summary = collect_backtest_summary(experiment_dir)
                 summary_rows.append(
                     {
@@ -2354,9 +2834,13 @@ if __name__ == "__main__":
                     f"{format_elapsed_time(times_elapsed)} ({times_elapsed:.2f} 秒)\n"
                 )
 
+            if RUN_BACKTEST:
+                build_window_future_ranking_summary(window_dir)
+
             plot_window_annual_reset_aggregate(window_dir, REWARD_TYPE)
             plot_window_training_reward_aggregate(window_dir, REWARD_TYPE)
-            plot_window_deterministic_eval_aggregate(window_dir, REWARD_TYPE)
+            # 2026-08-08: 暫停產出 deterministic_eval_curve_average_<reward_type> 資料夾。
+            # plot_window_deterministic_eval_aggregate(window_dir, REWARD_TYPE)
 
             window_elapsed = time.perf_counter() - window_start_counter
             window_completed_at = datetime.now()
@@ -2437,6 +2921,12 @@ if __name__ == "__main__":
         )
         for script in scripts_to_run():
             run_script(script, child_env, project_root, experiment_timer)
+        if RUN_BACKTEST:
+            build_annual_reset_stock_outputs(
+                experiment_dir=experiment_dir,
+                agent_name=primary_agent_name(),
+                reward_type=REWARD_TYPE,
+            )
         print("🎉 單次實驗執行完畢！")
         print(f"結果資料夾：{experiment_dir}")
 
