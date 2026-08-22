@@ -56,7 +56,7 @@ SOURCE_3 = {
     "label": "DWFT n=60",
     "reward_type": "v6",
     "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260811_142912_reinforce",
-    "color": "darkorange",
+    "color": "black",
 }
 
 SOURCES = [SOURCE_1, SOURCE_2, SOURCE_3]

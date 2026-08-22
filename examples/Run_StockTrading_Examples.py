@@ -670,6 +670,10 @@ def base_experiment_config() -> dict[str, Any]:
         "reward_type": REWARD_TYPE,
         "reward_params": REWARD_PARAMS,
         "future_ranking_params": FUTURE_RANKING_PARAMS,
+        "indicator_mode": config.OBSERVATION_FEATURE_MODE,
+        "use_expanded_indicators": config.USE_EXPANDED_INDICATORS,
+        "technical_indicators": list(config.INDICATORS),
+        "additional_raw_features": list(config.ADDITIONAL_RAW_FEATURES),
         "small_diagnostic_experiment": SMALL_DIAGNOSTIC_EXPERIMENT,
         "diagnostic_window_count": DIAGNOSTIC_WINDOW_COUNT,
         "rolling_window_mode": ROLLING_WINDOW_MODE,
@@ -1275,6 +1279,244 @@ def plot_window_training_reward_aggregate(window_dir: Path, reward_type: str) ->
     print(f"Window training reward {TIMES_EXPERIMENTS}-times average saved to: {output_dir}")
 
 
+
+def _print_individual_stock_epoch_warning(
+    window_dir: Path,
+    ticker: str,
+    times_details: list[tuple[str, int | None]],
+    expected_epoch_count: int | None,
+    reason: str,
+) -> None:
+    print("WARNING: 5-times individual stock train reward average skipped.")
+    print(f"  Window: {window_dir.name}")
+    print(f"  Ticker: {ticker}")
+    print(f"  Reason: {reason}")
+    print(f"  Expected Epoch Count: {expected_epoch_count if expected_epoch_count is not None else 'unknown'}")
+    for times_name, actual_count in times_details:
+        count_text = actual_count if actual_count is not None else "missing"
+        print(f"  {times_name}: Actual Epoch Count = {count_text}")
+    print("  No interpolation/fill/truncation was applied.")
+
+
+def plot_window_individual_stock_train_reward_aggregate(
+    window_dir: Path,
+    reward_type: str,
+) -> None:
+    """Average each stock's existing epoch reward across all times in one Window.
+
+    This reads only the already-saved stock_epoch_reward CSV values. Epochs are
+    aligned by ticker + epoch, and any missing/mismatched epoch set causes that
+    ticker to be skipped with an explicit warning instead of being truncated.
+    """
+    times_dirs = sorted(path for path in window_dir.iterdir() if is_backtest_times_dir(path))
+    if len(times_dirs) != TIMES_EXPERIMENTS:
+        print(
+            "Individual stock train reward aggregate skipped: "
+            f"expected {TIMES_EXPERIMENTS} times folders, found {len(times_dirs)} in {window_dir}."
+        )
+        return
+
+    stock_universe: list[str] = []
+    for times_dir in times_dirs:
+        train_data_path = times_dir / "data" / "train_data.csv"
+        if not train_data_path.exists():
+            continue
+        try:
+            train_df = pd.read_csv(train_data_path, usecols=["tic"])
+        except Exception:
+            continue
+        stock_universe = [str(ticker) for ticker in pd.unique(train_df["tic"].dropna())]
+        if stock_universe:
+            break
+
+    if not stock_universe:
+        first_source_dir = times_dirs[0] / "individual_stock_train_reward_curve"
+        if first_source_dir.exists():
+            suffix = "_reward_curve.csv"
+            stock_universe = [
+                path.name[: -len(suffix)]
+                for path in sorted(first_source_dir.glob(f"*{suffix}"))
+            ]
+
+    if not stock_universe:
+        print(f"No individual stock train reward sources found in {window_dir}.")
+        return
+
+    if len(stock_universe) != 30:
+        print(
+            "WARNING: Window stock universe count is not 30: "
+            f"Window={window_dir.name}, Actual Stock Count={len(stock_universe)}, Expected Stock Count=30"
+        )
+
+    output_dir = window_dir / f"individual_stock_train_reward_curve_average_{reward_type}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_rows: list[dict[str, Any]] = []
+    generated_count = 0
+
+    for ticker in stock_universe:
+        series_by_times: dict[str, pd.Series] = {}
+        times_details: list[tuple[str, int | None]] = []
+        source_paths: dict[str, Path] = {}
+        invalid_reason = ""
+
+        for times_dir in times_dirs:
+            csv_path = (
+                times_dir
+                / "individual_stock_train_reward_curve"
+                / f"{safe_filename(ticker)}_reward_curve.csv"
+            )
+            source_paths[times_dir.name] = csv_path
+            if not csv_path.exists():
+                times_details.append((times_dir.name, None))
+                invalid_reason = f"missing source CSV: {csv_path}"
+                continue
+
+            try:
+                source_df = pd.read_csv(csv_path)
+            except Exception as exc:
+                times_details.append((times_dir.name, None))
+                invalid_reason = f"failed to read source CSV: {exc}"
+                continue
+
+            required_columns = {"epoch", "stock_epoch_reward"}
+            if not required_columns.issubset(source_df.columns):
+                times_details.append((times_dir.name, None))
+                invalid_reason = (
+                    "source CSV missing required columns: "
+                    f"{sorted(required_columns - set(source_df.columns))}"
+                )
+                continue
+
+            normalized = source_df[["epoch", "stock_epoch_reward"]].copy()
+            normalized["epoch"] = pd.to_numeric(normalized["epoch"], errors="coerce")
+            normalized["stock_epoch_reward"] = pd.to_numeric(
+                normalized["stock_epoch_reward"], errors="coerce"
+            )
+            normalized = normalized.dropna(subset=["epoch", "stock_epoch_reward"])
+            normalized["epoch"] = normalized["epoch"].astype(int)
+
+            if normalized["epoch"].duplicated().any():
+                times_details.append((times_dir.name, len(normalized)))
+                invalid_reason = "duplicate epoch values found in source CSV"
+                continue
+
+            normalized = normalized.sort_values("epoch")
+            reward_series = normalized.set_index("epoch")["stock_epoch_reward"]
+            series_by_times[times_dir.name] = reward_series
+            times_details.append((times_dir.name, len(reward_series)))
+
+        if len(series_by_times) != TIMES_EXPERIMENTS:
+            expected_count = max(
+                (count for _, count in times_details if count is not None),
+                default=None,
+            )
+            _print_individual_stock_epoch_warning(
+                window_dir,
+                ticker,
+                times_details,
+                expected_count,
+                invalid_reason or "not all times have valid source data",
+            )
+            continue
+
+        expected_times_name = max(series_by_times, key=lambda name: len(series_by_times[name]))
+        expected_epochs = series_by_times[expected_times_name].index
+        expected_epoch_count = len(expected_epochs)
+        epoch_sets_match = all(
+            reward_series.index.equals(expected_epochs)
+            for reward_series in series_by_times.values()
+        )
+        if not epoch_sets_match:
+            _print_individual_stock_epoch_warning(
+                window_dir,
+                ticker,
+                times_details,
+                expected_epoch_count,
+                "epoch IDs/counts do not match exactly across times",
+            )
+            continue
+
+        aligned = pd.concat(series_by_times.values(), axis=1)
+        aligned.columns = list(series_by_times.keys())
+        if aligned.isna().any().any():
+            _print_individual_stock_epoch_warning(
+                window_dir,
+                ticker,
+                times_details,
+                expected_epoch_count,
+                "aligned reward table contains missing values",
+            )
+            continue
+
+        aggregate_df = pd.DataFrame(
+            {
+                "epoch": aligned.index.astype(int),
+                "average_reward": aligned.mean(axis=1).to_numpy(),
+                "min_reward": aligned.min(axis=1).to_numpy(),
+                "max_reward": aligned.max(axis=1).to_numpy(),
+                "times_count": len(series_by_times),
+            }
+        )
+
+        csv_path = output_dir / f"{safe_filename(ticker)}_reward_curve.csv"
+        png_path = output_dir / f"{safe_filename(ticker)}_reward_curve.png"
+        aggregate_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+        fig, ax = plt.subplots(figsize=(15, 5))
+        ax.fill_between(
+            aggregate_df["epoch"],
+            aggregate_df["min_reward"],
+            aggregate_df["max_reward"],
+            color="blue",
+            alpha=0.16,
+        )
+        ax.plot(
+            aggregate_df["epoch"],
+            aggregate_df["average_reward"],
+            color="blue",
+            linewidth=2.0,
+        )
+        ax.set_title(
+            f"{ticker} Individual Train Reward Curve "
+            f"({reward_display_name(reward_type)}, {TIMES_EXPERIMENTS}-times average)"
+        )
+        set_axis_labels_horizontal(ax, "Epoch", "Reward", ylabel_pad=75)
+        ax.grid(True, alpha=0.25)
+        fig.tight_layout()
+        fig.savefig(png_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        for times_name, source_path in source_paths.items():
+            source_rows.append(
+                {
+                    "ticker": ticker,
+                    "times_dir": times_name,
+                    "source_csv": str(source_path),
+                    "output_csv": str(csv_path),
+                    "output_png": str(png_path),
+                    "alignment": "ticker + epoch",
+                    "range_definition": f"min-max across {TIMES_EXPERIMENTS} runs",
+                }
+            )
+        generated_count += 1
+
+    if source_rows:
+        pd.DataFrame(source_rows).to_csv(
+            output_dir / "image_source_manifest.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
+
+    if generated_count != len(stock_universe):
+        print(
+            "WARNING: Individual stock train reward average output is incomplete: "
+            f"Window={window_dir.name}, Generated={generated_count}, Expected={len(stock_universe)}"
+        )
+    print(
+        f"Window individual stock train reward {TIMES_EXPERIMENTS}-times average saved to: "
+        f"{output_dir} ({generated_count} stock plots)"
+    )
+
 def plot_window_deterministic_eval_aggregate(window_dir: Path, reward_type: str) -> None:
     """Average periodic deterministic REINFORCE evaluation curves across runs."""
     if primary_agent_name() != "reinforce":
@@ -1613,7 +1855,11 @@ def _make_previous_state_for_continuous(
         [float(cash)]
         + [0.0] * stock_dimension
         + [float(x) for x in aligned_shares]
-        + [0.0] * (len(config.INDICATORS) * stock_dimension)
+        + [0.0]
+        * (
+            (len(config.INDICATORS) + len(config.ADDITIONAL_RAW_FEATURES))
+            * stock_dimension
+        )
     )
 
 
@@ -1640,14 +1886,14 @@ def _run_continuous_window_agent(
     """Run one test window using carried cash/holdings as the initial portfolio."""
     from stable_baselines3 import PPO
     from finrl.agents.policy_gradient import ReinforceAgent
-    from finrl.config import INDICATORS
+    from finrl.config import ADDITIONAL_RAW_FEATURES, INDICATORS
     from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
 
     set_random_seed(random_seed)
 
     trade = _load_trade_data_for_continuous(trade_data_path)
     stock_dimension = len(trade.tic.unique())
-    state_space = 1 + 2 * stock_dimension + len(INDICATORS) * stock_dimension
+    state_space = config.get_stock_trading_state_space(stock_dimension)
     tic_order = _get_first_day_tic_order(trade)
     aligned_shares = _align_shares_to_tic_order(carried_shares_by_tic, tic_order)
 
@@ -1675,6 +1921,7 @@ def _run_continuous_window_agent(
         "state_space": state_space,
         "stock_dim": stock_dimension,
         "tech_indicator_list": INDICATORS,
+        "additional_raw_features": ADDITIONAL_RAW_FEATURES,
         "action_space": stock_dimension,
         "reward_scaling": 1e-4 if normalize_reward_type_for_continuous(reward_type) == "v0" else 1.0,
         "initial": not use_carried_state,
@@ -2673,6 +2920,7 @@ if __name__ == "__main__":
     print("=" * 80)
     print(f"Run experiment 開始時間：{experiment_timer.started_at.strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80 + "\n")
+    config.print_observation_feature_mode()
 
     if ROLLING_WINDOW_MODE:
         windows = generate_rolling_windows(
@@ -2839,6 +3087,7 @@ if __name__ == "__main__":
 
             plot_window_annual_reset_aggregate(window_dir, REWARD_TYPE)
             plot_window_training_reward_aggregate(window_dir, REWARD_TYPE)
+            plot_window_individual_stock_train_reward_aggregate(window_dir, REWARD_TYPE)
             # 2026-08-08: 暫停產出 deterministic_eval_curve_average_<reward_type> 資料夾。
             # plot_window_deterministic_eval_aggregate(window_dir, REWARD_TYPE)
 

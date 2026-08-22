@@ -30,9 +30,14 @@ TEST_END_DATE = "2026-03-20"
 TRADE_START_DATE = "2025-01-01"
 TRADE_END_DATE = "2026-03-20"
 
+# Observation feature experiment switch.
+# False = keep the original FinRL observation used by this project.
+# True  = use the expanded technical indicators plus raw open/high/low/volume.
+USE_EXPANDED_INDICATORS = False
+
 # stockstats technical indicator column names
 # check https://pypi.org/project/stockstats/ for different names
-INDICATORS = [
+ORIGINAL_INDICATORS = [
     "macd",
     "boll_ub",
     "boll_lb",
@@ -42,6 +47,66 @@ INDICATORS = [
     "close_30_sma",
     "close_60_sma",
 ]
+
+EXPANDED_INDICATORS = [
+    "close_5_sma",
+    "close_10_sma",
+    "close_20_sma",
+    "close_60_sma",
+    "close_120_sma",
+    "close_240_sma",
+    "macd",
+    "kdjk",
+    "kdjd",
+    "kdjj",
+    "atr",
+    "cci",
+    "close_-6_d",
+    "close_-10_d",
+    "close_-12_d",
+    "close_-18_d",
+    "close_5_roc",
+    "close_10_roc",
+    "close_12_roc",
+    "wr",
+    "pvo",
+]
+
+EXPANDED_RAW_FEATURES = ["open", "high", "low", "volume"]
+
+# Keep INDICATORS as the active technical-indicator list so existing data
+# preprocessing call sites do not need a second switch. Raw market features
+# are already present in the downloaded dataframe and are appended only by
+# StockTradingEnv when expanded mode is enabled.
+INDICATORS = EXPANDED_INDICATORS if USE_EXPANDED_INDICATORS else ORIGINAL_INDICATORS
+ADDITIONAL_RAW_FEATURES = EXPANDED_RAW_FEATURES if USE_EXPANDED_INDICATORS else []
+OBSERVATION_FEATURE_MODE = "expanded" if USE_EXPANDED_INDICATORS else "original"
+
+
+def get_stock_trading_state_space(stock_dim: int) -> int:
+    """Return the active StockTradingEnv observation dimension."""
+    feature_count = len(INDICATORS) + len(ADDITIONAL_RAW_FEATURES)
+    return 1 + 2 * int(stock_dim) + feature_count * int(stock_dim)
+
+
+def print_observation_feature_mode(stock_dim: int | None = None) -> None:
+    """Print the active observation feature set for experiment verification."""
+    print("========================================")
+    print(f"Observation Feature Mode: {OBSERVATION_FEATURE_MODE.upper()}")
+    print(f"USE_EXPANDED_INDICATORS = {USE_EXPANDED_INDICATORS}")
+    print("Technical Indicators:")
+    for indicator in INDICATORS:
+        print(f"- {indicator}")
+    if ADDITIONAL_RAW_FEATURES:
+        print("Additional Raw Features:")
+        for feature in ADDITIONAL_RAW_FEATURES:
+            print(f"- {feature}")
+    if stock_dim is not None:
+        print(f"Stock Dimension: {stock_dim}")
+        print(f"Technical Indicator Count: {len(INDICATORS)}")
+        print(f"Additional Raw Feature Count: {len(ADDITIONAL_RAW_FEATURES)}")
+        print(f"Final Observation Dimension: {get_stock_trading_state_space(stock_dim)}")
+    print("========================================")
 
 
 # Model Parameters

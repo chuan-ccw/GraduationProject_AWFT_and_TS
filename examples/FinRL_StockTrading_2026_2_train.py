@@ -25,7 +25,7 @@ from stable_baselines3.common.logger import configure
 from finrl.agents.policy_gradient import ReinforceAgent
 from finrl.agents.stablebaselines3.models import DRLAgent
 from finrl import config
-from finrl.config import INDICATORS
+from finrl.config import ADDITIONAL_RAW_FEATURES, INDICATORS
 from finrl.main import check_and_make_directories
 from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
 from experiment_settings import env_bool, env_int, env_json, env_str
@@ -759,8 +759,8 @@ if TRAIN_TERMINAL_SKIP_DAYS > 0:
     print(f"  Guard file             : {guard_path}")
 
 stock_dimension = len(train.tic.unique())
-state_space = 1 + 2 * stock_dimension + len(INDICATORS) * stock_dimension
-print(f"Stock Dimension: {stock_dimension}, State Space: {state_space}")
+state_space = config.get_stock_trading_state_space(stock_dimension)
+config.print_observation_feature_mode(stock_dimension)
 
 buy_cost_list = sell_cost_list = [0.001] * stock_dimension
 num_stock_shares = [0] * stock_dimension
@@ -774,6 +774,7 @@ env_kwargs = {
     "state_space": state_space,
     "stock_dim": stock_dimension,
     "tech_indicator_list": INDICATORS,
+    "additional_raw_features": ADDITIONAL_RAW_FEATURES,
     "action_space": stock_dimension,
     "reward_scaling": REWARD_SCALING,
     "terminal_skip_days": TRAIN_TERMINAL_SKIP_DAYS,

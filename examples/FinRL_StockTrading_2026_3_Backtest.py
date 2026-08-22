@@ -24,7 +24,7 @@ from stable_baselines3.common.utils import set_random_seed
 from finrl.agents.policy_gradient import ReinforceAgent
 from finrl.agents.stablebaselines3.models import DRLAgent
 from finrl import config
-from finrl.config import INDICATORS
+from finrl.config import ADDITIONAL_RAW_FEATURES, INDICATORS
 from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
 from result_manager import make_experiment_dir, save_config
 from experiment_settings import env_bool, env_int, env_json, env_str
@@ -371,8 +371,8 @@ trained_sac = SAC.load(TRAINED_MODEL_DIR / "agent_sac") if if_using_sac else Non
 # %% Part 3. Backtesting - DRL agents
 
 stock_dimension = len(trade.tic.unique())
-state_space = 1 + 2 * stock_dimension + len(INDICATORS) * stock_dimension
-print(f"Stock Dimension: {stock_dimension}, State Space: {state_space}")
+state_space = config.get_stock_trading_state_space(stock_dimension)
+config.print_observation_feature_mode(stock_dimension)
 
 buy_cost_list = sell_cost_list = [0.001] * stock_dimension
 num_stock_shares = [0] * stock_dimension
@@ -386,6 +386,7 @@ env_kwargs = {
     "state_space": state_space,
     "stock_dim": stock_dimension,
     "tech_indicator_list": INDICATORS,
+    "additional_raw_features": ADDITIONAL_RAW_FEATURES,
     "action_space": stock_dimension,
     "reward_scaling": REWARD_SCALING,
 }

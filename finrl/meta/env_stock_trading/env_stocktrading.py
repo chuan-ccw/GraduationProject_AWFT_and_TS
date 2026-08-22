@@ -65,6 +65,7 @@ class StockTradingEnv(gym.Env):
         mode="",
         iteration="",
         terminal_skip_days: int = 0,
+        additional_raw_features: list[str] | None = None,
     ):
         self.day = day
         self.df = df
@@ -87,6 +88,7 @@ class StockTradingEnv(gym.Env):
         self.state_space = state_space
         self.action_space = action_space
         self.tech_indicator_list = tech_indicator_list
+        self.additional_raw_features = list(additional_raw_features or [])
         self.action_space = spaces.Box(low=-1, high=1, shape=(self.action_space,))
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(self.state_space,)
@@ -601,6 +603,13 @@ class StockTradingEnv(gym.Env):
                         ),
                         [],
                     )
+                    + sum(
+                        (
+                            self.data[feature].values.tolist()
+                            for feature in self.additional_raw_features
+                        ),
+                        [],
+                    )
                 )  # append initial stocks_share to initial state, instead of all zero
             else:
                 # for single stock
@@ -609,6 +618,10 @@ class StockTradingEnv(gym.Env):
                     + [self.data.close]
                     + [0] * self.stock_dim
                     + sum(([self.data[tech]] for tech in self.tech_indicator_list), [])
+                    + sum(
+                        ([self.data[feature]] for feature in self.additional_raw_features),
+                        [],
+                    )
                 )
         else:
             # Using Previous State
@@ -627,6 +640,13 @@ class StockTradingEnv(gym.Env):
                         ),
                         [],
                     )
+                    + sum(
+                        (
+                            self.data[feature].values.tolist()
+                            for feature in self.additional_raw_features
+                        ),
+                        [],
+                    )
                 )
             else:
                 # for single stock
@@ -637,6 +657,10 @@ class StockTradingEnv(gym.Env):
                         (self.stock_dim + 1) : (self.stock_dim * 2 + 1)
                     ]
                     + sum(([self.data[tech]] for tech in self.tech_indicator_list), [])
+                    + sum(
+                        ([self.data[feature]] for feature in self.additional_raw_features),
+                        [],
+                    )
                 )
         return state
 
@@ -654,6 +678,13 @@ class StockTradingEnv(gym.Env):
                     ),
                     [],
                 )
+                + sum(
+                    (
+                        self.data[feature].values.tolist()
+                        for feature in self.additional_raw_features
+                    ),
+                    [],
+                )
             )
 
         else:
@@ -663,6 +694,10 @@ class StockTradingEnv(gym.Env):
                 + [self.data.close]
                 + list(self.state[(self.stock_dim + 1) : (self.stock_dim * 2 + 1)])
                 + sum(([self.data[tech]] for tech in self.tech_indicator_list), [])
+                + sum(
+                    ([self.data[feature]] for feature in self.additional_raw_features),
+                    [],
+                )
             )
 
         return state

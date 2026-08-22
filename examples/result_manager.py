@@ -182,6 +182,8 @@ def append_reward_experiment_record(
         "folder_path": str(experiment_dir),
         "model": payload.get("primary_agent_name", ""),
         "reward_type": payload.get("reward_type", ""),
+        "indicator_mode": payload.get("indicator_mode", ""),
+        "use_expanded_indicators": payload.get("use_expanded_indicators", ""),
         "times_experiments": payload.get("times_experiments", ""),
         "rolling_window_mode": payload.get("rolling_window_mode", ""),
         "rolling_start_date": payload.get("rolling_start_date", ""),

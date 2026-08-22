@@ -30,13 +30,13 @@ EXPERIMENT_ROOT = os.environ.get(
     "EXPERIMENT_ROOT",
     r"C:\Users\User\Desktop\GraduationProject\Experence_result",
 )
-SOURCE_A_FOLDER = os.environ.get("REWARD_CURVE_SOURCE_A", "rolling_2018-2025_train3y_test1y_shift1y_20260812_134420_reinforce")
-SOURCE_B_FOLDER = os.environ.get("REWARD_CURVE_SOURCE_B", "rolling_2018-2025_train3y_test1y_shift1y_20260811_142912_reinforce")
+SOURCE_A_FOLDER = os.environ.get("REWARD_CURVE_SOURCE_A", "rolling_2018-2025_train3y_test1y_shift1y_20260818_141618_reinforce") # blue, 322
+SOURCE_B_FOLDER = os.environ.get("REWARD_CURVE_SOURCE_B", "rolling_2018-2025_train3y_test1y_shift1y_20260819_220402_reinforce") # red
 WINDOW_FILTER = os.environ.get("REWARD_CURVE_WINDOW_FILTER", "")
-COMPARE_NAME = os.environ.get("REWARD_CURVE_COMPARE_NAME", "v3_vs_v6(n=60)_2")
+COMPARE_NAME = os.environ.get("REWARD_CURVE_COMPARE_NAME", "FinRL_reward_vs_DWFT_reward")
 
 REWARD_DISPLAY_NAMES = {
-    "v0": "original_reward",
+    "v0": "FinRL_reward",
     "v1": "buy_low_sell_high_reward",
     "v2": "future_day_reward",
     "v3": "future_avg_reward",
@@ -319,8 +319,10 @@ def main() -> None:
 
     metadata_a = load_experiment_metadata(source_a)
     metadata_b = load_experiment_metadata(source_b)
-    label_a = source_label(metadata_a, source_a.name)
-    label_b = source_label(metadata_b, source_b.name)
+    # label_a = source_label(metadata_a, source_a.name)
+    label_a = "FinRL_reward-REINFORCE"
+    # label_b = source_label(metadata_b, source_b.name)
+    label_b = "DWFT_reward-REINFORCE"
     compare_dir = make_compare_dir(source_a, source_b)
 
     manifest_rows: list[dict[str, object]] = []

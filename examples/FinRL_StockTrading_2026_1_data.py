@@ -44,6 +44,7 @@ print(f"  TRADE: {TRADE_START_DATE} to {TRADE_END_DATE}")
 print(f"  TRAIN_DATA_PATH: {TRAIN_DATA_PATH}")
 print(f"  TRADE_DATA_PATH: {TRADE_DATA_PATH}")
 print(f"  FUTURE_RANKING_DATA_PATH: {FUTURE_RANKING_DATA_PATH}")
+config.print_observation_feature_mode()
 
 # # %% Part 1. Fetch data - Single ticker
 
