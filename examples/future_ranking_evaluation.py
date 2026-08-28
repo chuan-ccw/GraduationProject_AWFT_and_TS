@@ -12,6 +12,7 @@ from matplotlib.colors import BoundaryNorm, ListedColormap
 import numpy as np
 import pandas as pd
 
+#舊分數算法(被打槍)(計算score)
 
 RANKING_CSV_NAME = "future_ranking_top5_bottom5.csv"
 RANKING_TOP5_PNG_NAME = "future_ranking_top5.png"

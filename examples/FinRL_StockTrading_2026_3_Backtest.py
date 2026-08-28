@@ -392,6 +392,51 @@ env_kwargs = {
 }
 
 
+def plot_reward_parameter_boxplot(
+    rewards: pd.DataFrame,
+    dwft_parameters: pd.DataFrame,
+    output_path: Path,
+    agent_name: str,
+) -> None:
+    """Plot the raw reward inputs so their numerical scales can be inspected."""
+    box_values: list[np.ndarray] = []
+    box_labels: list[str] = []
+
+    if dwft_parameters is not None and not dwft_parameters.empty:
+        for column, label in [("w", "w"), ("delta_w", "delta_w"), ("d", "d")]:
+            values = pd.to_numeric(dwft_parameters[column], errors="coerce").dropna()
+            if not values.empty:
+                box_values.append(values.to_numpy(dtype=float))
+                box_labels.append(label)
+
+    reward_values = pd.to_numeric(
+        rewards.get("step_reward_unscaled", pd.Series(dtype=float)),
+        errors="coerce",
+    ).dropna()
+    if not reward_values.empty:
+        box_values.append(reward_values.to_numpy(dtype=float))
+        box_labels.append("reward")
+
+    if not box_values:
+        print("No reward parameter values available for box plot.")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.boxplot(box_values, showfliers=True)
+    ax.set_xticks(np.arange(1, len(box_labels) + 1))
+    ax.set_xticklabels(box_labels)
+    ax.set_title(
+        f"Reward Parameter Box Plot - {agent_name.upper()} "
+        f"({reward_display_name(REWARD_TYPE)})"
+    )
+    ax.set_xlabel("Reward value / parameter")
+    ax.set_ylabel("Unscaled value")
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def make_trade_env() -> StockTradingEnv:
     return StockTradingEnv(
         df=trade,
@@ -433,6 +478,9 @@ def predict_and_collect(model, agent_name: str):
     reward_components = test_env.env_method(
         method_name="save_reward_components_memory"
     )[0]
+    dwft_parameters = test_env.env_method(
+        method_name="save_dwft_parameter_memory"
+    )[0]
 
     save_agent_diagnostics(
         agent_name,
@@ -443,6 +491,7 @@ def predict_and_collect(model, agent_name: str):
         weights,
         rewards,
         reward_components,
+        dwft_parameters,
     )
     return account_value, actions, holdings, weights, rewards
 
@@ -456,6 +505,7 @@ def save_agent_diagnostics(
     weights: pd.DataFrame,
     rewards: pd.DataFrame,
     reward_components: pd.DataFrame,
+    dwft_parameters: pd.DataFrame,
 ) -> None:
     suffix = f"{agent_name}_{REWARD_TYPE}_{TRADE_START_DATE}_to_{TRADE_END_DATE}_{today_str}"
 
@@ -470,6 +520,25 @@ def save_agent_diagnostics(
 
     weights_path = OUTPUT_DIR / f"post_trade_weights_{suffix}.csv"
     weights.to_csv(weights_path, index=False, encoding="utf-8-sig")
+
+    rewards_path = OUTPUT_DIR / f"reward_by_step_{suffix}.csv"
+    rewards.to_csv(rewards_path, index=False, encoding="utf-8-sig")
+
+    dwft_parameters_path = OUTPUT_DIR / f"dwft_parameters_{suffix}.csv"
+    if dwft_parameters is not None and not dwft_parameters.empty:
+        dwft_parameters.to_csv(
+            dwft_parameters_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+
+    reward_boxplot_path = OUTPUT_DIR / f"reward_parameter_boxplot_{suffix}.png"
+    plot_reward_parameter_boxplot(
+        rewards,
+        dwft_parameters,
+        reward_boxplot_path,
+        agent_name,
+    )
 
     reward_components_path = OUTPUT_DIR / f"reward_components_{suffix}.csv"
     reward_components.to_csv(
@@ -595,6 +664,10 @@ def save_agent_diagnostics(
 
     print(f"Executed actions saved to {actions_path}")
     print(f"Agent actions saved to {agent_actions_path}")
+    print(f"Daily unscaled reward saved to {rewards_path}")
+    if dwft_parameters is not None and not dwft_parameters.empty:
+        print(f"DWFT parameters (w, delta_w, d) saved to {dwft_parameters_path}")
+    print(f"Reward parameter box plot saved to {reward_boxplot_path}")
     print(f"Individual reward components saved to {reward_components_path}")
     print(f"Holdings saved to {holdings_path}")
     print(f"Post-trade weights saved to {weights_path}")

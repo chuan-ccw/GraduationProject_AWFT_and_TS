@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-#舊分數算法(被打槍)
+#舊分數算法(被打槍)(統計csv)
 
 # =====================================================
 # Future Ranking 5-window summary settings

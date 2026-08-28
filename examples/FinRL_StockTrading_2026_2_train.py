@@ -142,6 +142,50 @@ def reward_display_name(reward_type: str | None) -> str:
     return REWARD_DISPLAY_NAMES.get(key, str(reward_type or ""))
 
 
+def plot_reward_parameter_boxplot(
+    rewards: pd.DataFrame,
+    dwft_parameters: pd.DataFrame,
+    output_path: Path,
+    agent_name: str,
+) -> None:
+    """Plot raw train-evaluation reward inputs without normalization."""
+    box_values: list[np.ndarray] = []
+    box_labels: list[str] = []
+
+    if dwft_parameters is not None and not dwft_parameters.empty:
+        for column, label in [("w", "w"), ("delta_w", "delta_w"), ("d", "d")]:
+            values = pd.to_numeric(dwft_parameters[column], errors="coerce").dropna()
+            if not values.empty:
+                box_values.append(values.to_numpy(dtype=float))
+                box_labels.append(label)
+
+    reward_values = pd.to_numeric(
+        rewards.get("step_reward_unscaled", pd.Series(dtype=float)),
+        errors="coerce",
+    ).dropna()
+    if not reward_values.empty:
+        box_values.append(reward_values.to_numpy(dtype=float))
+        box_labels.append("reward")
+
+    if not box_values:
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.boxplot(box_values, showfliers=True)
+    ax.set_xticks(np.arange(1, len(box_labels) + 1))
+    ax.set_xticklabels(box_labels)
+    ax.set_title(
+        f"Train Evaluation Reward Parameter Box Plot - {agent_name.upper()} "
+        f"({reward_display_name(REWARD_TYPE)})"
+    )
+    ax.set_xlabel("Reward value / parameter")
+    ax.set_ylabel("Unscaled value")
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def get_future_reward_train_skip_days(reward_type: str, reward_params: dict) -> int:
     """Return how many final training days should be skipped as action states.
 
@@ -700,6 +744,9 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
 
     rewards = vec_env.env_method(method_name="save_reward_memory")[0]
     weights = vec_env.env_method(method_name="save_weight_memory")[0]
+    dwft_parameters = vec_env.env_method(
+        method_name="save_dwft_parameter_memory"
+    )[0]
     rewards = rewards.copy()
     rewards.insert(0, "env_step", np.arange(1, len(rewards) + 1))
 
@@ -710,10 +757,25 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
 
     reward_path = OUTPUT_DIR / f"train_eval_reward_by_step_{suffix}.csv"
     weights_path = OUTPUT_DIR / f"train_eval_post_trade_weights_{suffix}.csv"
+    dwft_parameters_path = OUTPUT_DIR / f"train_eval_dwft_parameters_{suffix}.csv"
+    reward_boxplot_path = OUTPUT_DIR / f"train_eval_reward_parameter_boxplot_{suffix}.png"
     # 2026-08-08: train_eval_cumulative_reward_by_step 圖片暫停產出。
     # plot_path = OUTPUT_DIR / f"train_eval_cumulative_reward_by_step_{suffix}.png"
     rewards.to_csv(reward_path, index=False, encoding="utf-8-sig")
     weights.to_csv(weights_path, index=False, encoding="utf-8-sig")
+    if dwft_parameters is not None and not dwft_parameters.empty:
+        dwft_parameters.to_csv(
+            dwft_parameters_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+    plot_reward_parameter_boxplot(
+        rewards,
+        dwft_parameters,
+        reward_boxplot_path,
+        agent_name,
+    )
+
     if agent_name.lower() == PRIMARY_AGENT_NAME:
         rewards.to_csv(OUTPUT_DIR / "train_eval_reward_curve.csv", index=False, encoding="utf-8-sig")
         weights.to_csv(
@@ -721,9 +783,22 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
             index=False,
             encoding="utf-8-sig",
         )
+        if dwft_parameters is not None and not dwft_parameters.empty:
+            dwft_parameters.to_csv(
+                OUTPUT_DIR / "train_eval_dwft_parameters.csv",
+                index=False,
+                encoding="utf-8-sig",
+            )
+        if reward_boxplot_path.exists():
+            (OUTPUT_DIR / "train_eval_reward_parameter_boxplot.png").write_bytes(
+                reward_boxplot_path.read_bytes()
+            )
     # plot_train_eval_reward_curve(rewards, plot_path, agent_name)
 
     print(f"Train evaluation reward by step saved to {reward_path}")
+    if dwft_parameters is not None and not dwft_parameters.empty:
+        print(f"Train evaluation DWFT parameters saved to {dwft_parameters_path}")
+    print(f"Train evaluation reward parameter box plot saved to {reward_boxplot_path}")
     print(f"Train evaluation post-trade weights saved to {weights_path}")
 
 # %% Part 2. Build environment

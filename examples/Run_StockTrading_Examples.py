@@ -40,7 +40,7 @@ from future_ranking_evaluation import (
 #   "v5" = Weighted-Future-Trend (WFT)
 #   "v6" = Delta-Weighted-Future-Trend (DWFT)
 
-REWARD_TYPE = "v6"
+REWARD_TYPE = "v0"
 
 # reward v6 delta-weight variable switch:
 #   "original_delta_weight"   = today's post-trade weight minus the previous
@@ -144,6 +144,51 @@ def reward_display_name(reward_type: str | None) -> str:
     if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
         key = key[len("reward_"):]
     return REWARD_DISPLAY_NAMES.get(key, str(reward_type or ""))
+
+
+def plot_reward_parameter_boxplot(
+    rewards: pd.DataFrame,
+    dwft_parameters: pd.DataFrame,
+    output_path: Path,
+    reward_type: str,
+    title_suffix: str = "",
+) -> None:
+    """Plot raw reward inputs without normalization so their scales stay visible."""
+    box_values: list[np.ndarray] = []
+    box_labels: list[str] = []
+
+    if dwft_parameters is not None and not dwft_parameters.empty:
+        for column, label in [("w", "w"), ("delta_w", "delta_w"), ("d", "d")]:
+            values = pd.to_numeric(dwft_parameters[column], errors="coerce").dropna()
+            if not values.empty:
+                box_values.append(values.to_numpy(dtype=float))
+                box_labels.append(label)
+
+    reward_values = pd.to_numeric(
+        rewards.get("step_reward_unscaled", pd.Series(dtype=float)),
+        errors="coerce",
+    ).dropna()
+    if not reward_values.empty:
+        box_values.append(reward_values.to_numpy(dtype=float))
+        box_labels.append("reward")
+
+    if not box_values:
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.boxplot(box_values, showfliers=True)
+    ax.set_xticks(np.arange(1, len(box_labels) + 1))
+    ax.set_xticklabels(box_labels)
+    title = f"Reward Parameter Box Plot ({reward_display_name(reward_type)})"
+    if title_suffix:
+        title += f" - {title_suffix}"
+    ax.set_title(title)
+    ax.set_xlabel("Reward value / parameter")
+    ax.set_ylabel("Unscaled value")
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def set_axis_labels_horizontal(ax, xlabel: str | None = None, ylabel: str | None = None, ylabel_pad: int = 65) -> None:
@@ -1879,6 +1924,8 @@ def _run_continuous_window_agent(
     pd.DataFrame,
     pd.DataFrame,
     pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
     float,
     dict[str, float],
     list[str],
@@ -1959,6 +2006,9 @@ def _run_continuous_window_agent(
     reward_components = test_env.env_method(
         method_name="save_reward_components_memory"
     )[0]
+    dwft_parameters = test_env.env_method(
+        method_name="save_dwft_parameter_memory"
+    )[0]
 
     if holdings.empty:
         raise ValueError(f"{trade_data_path} 產生的 holdings 記錄是空的。")
@@ -1977,6 +2027,7 @@ def _run_continuous_window_agent(
         weights,
         rewards,
         reward_components,
+        dwft_parameters,
         next_cash,
         next_shares_by_tic,
         tic_order,
@@ -2482,6 +2533,7 @@ def run_continuous_5y_test(
                     weights,
                     rewards,
                     reward_components,
+                    dwft_parameters,
                     carried_cash,
                     carried_shares_by_tic,
                     tic_order,
@@ -2550,6 +2602,29 @@ def run_continuous_5y_test(
                 encoding="utf-8-sig",
             )
 
+            window_dwft_parameters_path = (
+                times_dir
+                / f"dwft_parameters_window_{window['window_id']:02d}_{reward_type}.csv"
+            )
+            if dwft_parameters is not None and not dwft_parameters.empty:
+                dwft_parameters.to_csv(
+                    window_dwft_parameters_path,
+                    index=False,
+                    encoding="utf-8-sig",
+                )
+
+            window_reward_boxplot_path = (
+                times_dir
+                / f"reward_parameter_boxplot_window_{window['window_id']:02d}_{reward_type}.png"
+            )
+            plot_reward_parameter_boxplot(
+                rewards,
+                dwft_parameters,
+                window_reward_boxplot_path,
+                reward_type,
+                title_suffix=f"Window {int(window['window_id']):02d} / Times {times_index:02d}",
+            )
+
             strategy = pd.to_numeric(account_value["account_value"], errors="coerce").dropna()
             window_summary_rows.append(
                 {
@@ -2573,6 +2648,12 @@ def run_continuous_5y_test(
                     "holdings_csv": str(window_holdings_path),
                     "weights_csv": str(window_weights_path),
                     "rewards_csv": str(window_rewards_path),
+                    "dwft_parameters_csv": (
+                        str(window_dwft_parameters_path)
+                        if dwft_parameters is not None and not dwft_parameters.empty
+                        else ""
+                    ),
+                    "reward_parameter_boxplot": str(window_reward_boxplot_path),
                     "predict_deterministic": TEST_PREDICT_DETERMINISTIC,
                 }
             )

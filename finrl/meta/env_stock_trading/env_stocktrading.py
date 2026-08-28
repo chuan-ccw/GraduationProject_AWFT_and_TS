@@ -13,6 +13,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from finrl.meta.env_stock_trading.reward_functions import (
     RewardContext,
+    calculate_dwft_parameters,
     calculate_individual_reward_components,
     calculate_reward,
     calculate_stock_weights_after_trade,
@@ -123,6 +124,7 @@ class StockTradingEnv(gym.Env):
         ]  # the initial total asset is calculated by cash + sum (num_share_stock_i * price_stock_i)
         self.rewards_memory = []
         self.reward_components_memory = []
+        self.dwft_parameter_memory = []
         self.last_episode_reward_components_memory = []
         self.last_episode_reward_component_dates = []
         self.actions_memory = []
@@ -454,9 +456,10 @@ class StockTradingEnv(gym.Env):
                 stock_holdings=stock_holdings_after_trade,
                 cash_after_trade=self.last_cash_after_buy,
             )
+            trade_date = self._get_date()
             self.post_trade_weights_memory.append(
                 self._get_post_trade_weight_snapshot(
-                    trade_date=self._get_date(),
+                    trade_date=trade_date,
                     tic_list=tic_list,
                     stock_prices=current_prices_before_trade,
                     stock_holdings=stock_holdings_after_trade,
@@ -518,6 +521,39 @@ class StockTradingEnv(gym.Env):
                 ctx=reward_context,
                 params=self.reward_params,
             )
+
+            reward_key = str(self.reward_type).strip().lower()
+            if reward_key.startswith("reward_"):
+                reward_key = reward_key[len("reward_") :]
+            if reward_key in {
+                "v6",
+                "delta_weight_future",
+                "delta_weight_future_reward",
+                "portfolio_weight_change_future_return",
+                "portfolio_weight_change_future_return_reward",
+                "dwft",
+                "delta_weighted_future_trend",
+                "delta_weighted_future_trend_reward",
+            }:
+                weights_used, delta_weights, future_signal, valid_mask = (
+                    calculate_dwft_parameters(
+                        reward_context,
+                        self.reward_params,
+                    )
+                )
+                for index, tic in enumerate(tic_list):
+                    if not valid_mask[index]:
+                        continue
+                    self.dwft_parameter_memory.append(
+                        {
+                            "date": trade_date,
+                            "tic": str(tic),
+                            "w": float(weights_used[index]),
+                            "delta_w": float(delta_weights[index]),
+                            "d": float(future_signal[index]),
+                        }
+                    )
+
             self.previous_stock_weights_after_trade = (
                 stock_weights_after_trade.copy()
             )
@@ -570,6 +606,7 @@ class StockTradingEnv(gym.Env):
         # self.iteration=self.iteration
         self.rewards_memory = []
         self.reward_components_memory = []
+        self.dwft_parameter_memory = []
         self.actions_memory = []
         self.agent_actions_memory = []
         self.state_memory = []
@@ -816,6 +853,13 @@ class StockTradingEnv(gym.Env):
             self.last_episode_reward_component_dates,
         )
         return df_components
+
+    def save_dwft_parameter_memory(self):
+        """Return per-stock w, delta_w, and d values actually used by DWFT."""
+        return pd.DataFrame(
+            self.dwft_parameter_memory,
+            columns=["date", "tic", "w", "delta_w", "d"],
+        )
 
     def save_reward_memory(self):
         # rewards_memory stores unscaled rewards before reward_scaling.

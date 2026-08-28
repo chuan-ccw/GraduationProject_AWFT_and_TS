@@ -608,6 +608,150 @@ def reward_v5(
     return float(np.sum(stock_weights[valid] * future_avg_returns[valid]))
 
 
+def calculate_dwft_parameters(
+    ctx: RewardContext,
+    params: Dict[str, Any] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return the exact per-stock values used by reward v6.
+
+    Returns:
+        w: post-trade portfolio weight for each stock.
+        delta_w: selected weight change for each stock.
+        d: selected future signal (future_direction or future_avg_return).
+        valid: mask of stocks included in the reward sum.
+    """
+    params = params or {}
+
+    eps = float(params.get("eps", 1e-8))
+    n_future = int(params.get("n_future", 5))
+    price_col = params.get("price_col", "close")
+    future_variable = str(
+        params.get("future_variable", "future_direction")
+    ).strip().lower()
+    delta_weight_variable = str(
+        params.get("delta_weight_variable", "original_delta_weight")
+    ).strip().lower()
+
+    future_variable_aliases = {
+        "future_direction": "future_direction",
+        "direction": "future_direction",
+        "future_avg_return": "future_avg_return",
+        "future_average": "future_avg_return",
+        "future_avg_returns": "future_avg_return",
+    }
+    if future_variable not in future_variable_aliases:
+        available = ", ".join(sorted(future_variable_aliases))
+        raise ValueError(
+            "reward_v6 parameter 'future_variable' must be one of: "
+            f"{available}. Got {future_variable!r}."
+        )
+    future_variable = future_variable_aliases[future_variable]
+
+    delta_weight_variable_aliases = {
+        "original_delta_weight": "original_delta_weight",
+        "delta_weight": "original_delta_weight",
+        "previous_day_delta_weight": "original_delta_weight",
+        "same_price_delta_weight": "same_price_delta_weight",
+    }
+    if delta_weight_variable not in delta_weight_variable_aliases:
+        available = ", ".join(sorted(delta_weight_variable_aliases))
+        raise ValueError(
+            "reward_v6 parameter 'delta_weight_variable' must be one of: "
+            f"{available}. Got {delta_weight_variable!r}."
+        )
+    delta_weight_variable = delta_weight_variable_aliases[delta_weight_variable]
+
+    current_prices = np.asarray(ctx.current_prices_before_trade, dtype=float)
+    current_weights = np.asarray(ctx.stock_weights_after_trade, dtype=float)
+    if current_weights.shape != current_prices.shape:
+        raise ValueError(
+            "stock_weights_after_trade and current_prices_before_trade must "
+            f"have the same shape, got {current_weights.shape} and "
+            f"{current_prices.shape}."
+        )
+
+    if delta_weight_variable == "same_price_delta_weight":
+        if ctx.stock_weights_before_trade is None:
+            raise ValueError(
+                "stock_weights_before_trade is required when reward v6 uses "
+                "same_price_delta_weight."
+            )
+        reference_weights = np.asarray(ctx.stock_weights_before_trade, dtype=float)
+        reference_name = "stock_weights_before_trade"
+    else:
+        if ctx.previous_stock_weights_after_trade is None:
+            raise ValueError(
+                "previous_stock_weights_after_trade is required when reward "
+                "v6 uses original_delta_weight."
+            )
+        reference_weights = np.asarray(
+            ctx.previous_stock_weights_after_trade, dtype=float
+        )
+        reference_name = "previous_stock_weights_after_trade"
+
+    if reference_weights.shape != current_weights.shape:
+        raise ValueError(
+            f"{reference_name} and stock_weights_after_trade must have the "
+            f"same shape, got {reference_weights.shape} and "
+            f"{current_weights.shape}."
+        )
+
+    delta_weights = current_weights - reference_weights
+    empty_signal = np.full(current_prices.shape, np.nan, dtype=float)
+    empty_valid = np.zeros(current_prices.shape, dtype=bool)
+
+    price_matrix, day_to_pos = _get_price_matrix(ctx.env, ctx.tic_list, price_col)
+    current_pos = day_to_pos.get(ctx.current_day)
+    if current_pos is None:
+        return current_weights, delta_weights, empty_signal, empty_valid
+
+    start_pos = current_pos + 1
+    end_pos = current_pos + n_future + 1
+    if end_pos > price_matrix.shape[0]:
+        return current_weights, delta_weights, empty_signal, empty_valid
+
+    future_window = price_matrix[start_pos:end_pos]
+    avg_future_prices = np.nanmean(future_window, axis=0)
+    future_avg_returns = (avg_future_prices - current_prices) / (current_prices + eps)
+
+    future_max_prices = np.nanmax(future_window, axis=0)
+    future_min_prices = np.nanmin(future_window, axis=0)
+    future_max_positions = np.argmax(future_window, axis=0)
+    future_min_positions = np.argmin(future_window, axis=0)
+    future_direction_signs = np.sign(
+        future_max_positions - future_min_positions
+    ).astype(float)
+    future_direction = (
+        future_direction_signs
+        * (future_max_prices - future_min_prices)
+        / (current_prices + eps)
+    )
+
+    future_signal = (
+        future_direction
+        if future_variable == "future_direction"
+        else future_avg_returns
+    )
+
+    valid = (
+        np.isfinite(current_prices)
+        & np.isfinite(avg_future_prices)
+        & np.isfinite(future_avg_returns)
+        & np.isfinite(future_max_prices)
+        & np.isfinite(future_min_prices)
+        & np.isfinite(future_direction)
+        & np.isfinite(future_signal)
+        & np.isfinite(current_weights)
+        & np.isfinite(reference_weights)
+        & np.isfinite(delta_weights)
+        & np.all(np.isfinite(future_window), axis=0)
+        & (current_prices > eps)
+        & (avg_future_prices > eps)
+    )
+
+    return current_weights, delta_weights, future_signal, valid
+
+
 def reward_v6(
     ctx: RewardContext,
     params: Dict[str, Any] | None = None,
@@ -656,149 +800,9 @@ def reward_v6(
                current-day price P(i,t), isolating the weight change caused
                by today's executed trade.
     """
-    params = params or {}
-
-    eps = float(params.get("eps", 1e-8))
-    n_future = int(params.get("n_future", 5))
-    price_col = params.get("price_col", "close")
-    future_variable = str(
-        params.get("future_variable", "future_direction")
-    ).strip().lower()
-    delta_weight_variable = str(
-        params.get("delta_weight_variable", "original_delta_weight")
-    ).strip().lower()
-
-    future_variable_aliases = {
-        "future_direction": "future_direction",
-        "direction": "future_direction",
-        "future_avg_return": "future_avg_return",
-        "future_average": "future_avg_return",
-        "future_avg_returns": "future_avg_return",
-    }
-    if future_variable not in future_variable_aliases:
-        available = ", ".join(sorted(future_variable_aliases))
-        raise ValueError(
-            "reward_v6 parameter 'future_variable' must be one of: "
-            f"{available}. Got {future_variable!r}."
-        )
-    future_variable = future_variable_aliases[future_variable]
-
-    delta_weight_variable_aliases = {
-        "original_delta_weight": "original_delta_weight",
-        "delta_weight": "original_delta_weight",
-        "previous_day_delta_weight": "original_delta_weight",
-        "same_price_delta_weight": "same_price_delta_weight",
-    }
-    if delta_weight_variable not in delta_weight_variable_aliases:
-        available = ", ".join(sorted(delta_weight_variable_aliases))
-        raise ValueError(
-            "reward_v6 parameter 'delta_weight_variable' must be one of: "
-            f"{available}. Got {delta_weight_variable!r}."
-        )
-    delta_weight_variable = delta_weight_variable_aliases[delta_weight_variable]
-
-    price_matrix, day_to_pos = _get_price_matrix(ctx.env, ctx.tic_list, price_col)
-
-    current_pos = day_to_pos.get(ctx.current_day)
-    if current_pos is None:
-        return 0.0
-
-    start_pos = current_pos + 1
-    end_pos = current_pos + n_future + 1
-    if end_pos > price_matrix.shape[0]:
-        return 0.0
-
-    future_window = price_matrix[start_pos:end_pos]
-    current_prices = np.asarray(ctx.current_prices_before_trade, dtype=float)
-    current_weights = np.asarray(ctx.stock_weights_after_trade, dtype=float)
-
-    if current_weights.shape != current_prices.shape:
-        raise ValueError(
-            "stock_weights_after_trade and current_prices_before_trade must "
-            f"have the same shape, got {current_weights.shape} and "
-            f"{current_prices.shape}."
-        )
-
-    if delta_weight_variable == "same_price_delta_weight":
-        if ctx.stock_weights_before_trade is None:
-            raise ValueError(
-                "stock_weights_before_trade is required when reward v6 uses "
-                "same_price_delta_weight."
-            )
-        reference_weights = np.asarray(
-            ctx.stock_weights_before_trade,
-            dtype=float,
-        )
-        reference_name = "stock_weights_before_trade"
-    else:
-        if ctx.previous_stock_weights_after_trade is None:
-            raise ValueError(
-                "previous_stock_weights_after_trade is required when reward "
-                "v6 uses original_delta_weight."
-            )
-        reference_weights = np.asarray(
-            ctx.previous_stock_weights_after_trade,
-            dtype=float,
-        )
-        reference_name = "previous_stock_weights_after_trade"
-
-    if reference_weights.shape != current_weights.shape:
-        raise ValueError(
-            f"{reference_name} and stock_weights_after_trade must have the "
-            f"same shape, got {reference_weights.shape} and "
-            f"{current_weights.shape}."
-        )
-
-    avg_future_prices = np.nanmean(future_window, axis=0)
-    future_avg_returns = (avg_future_prices - current_prices) / (
-        current_prices + eps
-    )
-
-    future_max_prices = np.nanmax(future_window, axis=0)
-    future_min_prices = np.nanmin(future_window, axis=0)
-    future_max_positions = np.argmax(future_window, axis=0)
-    future_min_positions = np.argmin(future_window, axis=0)
-    future_direction_signs = np.sign(
-        future_max_positions - future_min_positions
-    ).astype(float)
-    future_direction = (
-        future_direction_signs
-        * (future_max_prices - future_min_prices)
-        / (current_prices + eps)
-    )
-
-    future_signal = (
-        future_direction
-        if future_variable == "future_direction"
-        else future_avg_returns
-    )
-
-    if delta_weight_variable == "same_price_delta_weight":
-        same_price_delta_weight = current_weights - reference_weights
-        delta_weights = same_price_delta_weight
-    else:
-        original_delta_weight = current_weights - reference_weights
-        delta_weights = original_delta_weight
-
-    valid = (
-        np.isfinite(current_prices)
-        & np.isfinite(avg_future_prices)
-        & np.isfinite(future_avg_returns)
-        & np.isfinite(future_max_prices)
-        & np.isfinite(future_min_prices)
-        & np.isfinite(future_direction)
-        & np.isfinite(future_signal)
-        & np.isfinite(current_weights)
-        & np.isfinite(reference_weights)
-        & np.isfinite(delta_weights)
-        & np.all(np.isfinite(future_window), axis=0)
-        & (current_prices > eps)
-        & (avg_future_prices > eps)
-    )
-
+    _, delta_weights, future_signal, valid = calculate_dwft_parameters(ctx, params)
     if not np.any(valid):
         return 0.0
-
     return float(np.sum(delta_weights[valid] * future_signal[valid]))
 
 

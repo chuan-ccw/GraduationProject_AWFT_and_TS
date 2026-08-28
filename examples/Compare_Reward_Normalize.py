@@ -15,6 +15,7 @@ import pandas as pd
 
 from result_manager import append_compare_experiment_record, load_experiment_metadata
 
+#274    調圖片尺寸
 
 # =====================================================
 # Manual Reward Curve compare settings
@@ -270,7 +271,7 @@ def plot_one_comparison(
     curve_a, max_abs_a = max_abs_normalize(curve_a, "Source A")
     curve_b, max_abs_b = max_abs_normalize(curve_b, "Source B")
 
-    fig, ax = plt.subplots(figsize=(15, 5))
+    fig, ax = plt.subplots(figsize=(10, 7))
 
     # Only keep the 5-times average solid lines. No min-max range shading.
     ax.plot(

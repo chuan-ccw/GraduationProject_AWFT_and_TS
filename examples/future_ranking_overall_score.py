@@ -20,7 +20,7 @@ import pandas as pd
 # =====================================================
 
 # Only change this folder name when analyzing another completed model.
-INPUT_FOLDER = r"rolling_2018-2025_train3y_test1y_shift1y_20260819_220402_reinforce"
+INPUT_FOLDER = r"rolling_2018-2025_train3y_test1y_shift1y_20260818_141618_reinforce"
 
 # Same experiment root style used by the current Compare scripts.
 EXPERIMENT_ROOT = Path(
