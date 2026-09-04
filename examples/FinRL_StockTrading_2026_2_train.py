@@ -47,7 +47,7 @@ def get_reward_scaling(reward_type: str) -> float:
     Choose reward_scaling by reward definition.
 
     v0 is a money-difference reward, so it keeps FinRL's original 1e-4.
-    v1/v2/v3/v4/v5/v6 are return-level rewards, so they should not be shrunk by 1e-4.
+    v1/v2/v3/v4/v5/v6/v7 are return-level rewards, so they should not be shrunk by 1e-4.
     """
     reward_key = str(reward_type).lower()
 
@@ -87,6 +87,11 @@ def get_reward_scaling(reward_type: str) -> float:
         "dwft",
         "delta_weighted_future_trend",
         "delta_weighted_future_trend_reward",
+        "v7",
+        "reward_v7",
+        "awft",
+        "action_weight_future_trend",
+        "action_weight_future_trend_reward",
     }:
         return 1.0
 
@@ -131,11 +136,16 @@ REWARD_DISPLAY_NAMES = {
     "dwft": "DWFT",
     "delta_weighted_future_trend": "DWFT",
     "delta_weighted_future_trend_reward": "DWFT",
+    "v7": "AWFT",
+    "reward_v7": "AWFT",
+    "awft": "AWFT",
+    "action_weight_future_trend": "AWFT",
+    "action_weight_future_trend_reward": "AWFT",
 }
 
 
 def reward_display_name(reward_type: str | None) -> str:
-    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5/v6."""
+    """Return the formal display name used in plots instead of reward version codes."""
     key = str(reward_type or "").strip().lower()
     if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
         key = key[len("reward_"):]
@@ -144,7 +154,7 @@ def reward_display_name(reward_type: str | None) -> str:
 
 def plot_reward_parameter_boxplot(
     rewards: pd.DataFrame,
-    dwft_parameters: pd.DataFrame,
+    reward_parameters: pd.DataFrame,
     output_path: Path,
     agent_name: str,
 ) -> None:
@@ -152,9 +162,11 @@ def plot_reward_parameter_boxplot(
     box_values: list[np.ndarray] = []
     box_labels: list[str] = []
 
-    if dwft_parameters is not None and not dwft_parameters.empty:
-        for column, label in [("w", "w"), ("delta_w", "delta_w"), ("d", "d")]:
-            values = pd.to_numeric(dwft_parameters[column], errors="coerce").dropna()
+    if reward_parameters is not None and not reward_parameters.empty:
+        for column, label in [("a", "a"), ("w", "w"), ("delta_w", "delta_w"), ("d", "d")]:
+            if column not in reward_parameters.columns:
+                continue
+            values = pd.to_numeric(reward_parameters[column], errors="coerce").dropna()
             if not values.empty:
                 box_values.append(values.to_numpy(dtype=float))
                 box_labels.append(label)
@@ -225,6 +237,11 @@ def get_future_reward_train_skip_days(reward_type: str, reward_params: dict) -> 
         "dwft",
         "delta_weighted_future_trend",
         "delta_weighted_future_trend_reward",
+        "v7",
+        "reward_v7",
+        "awft",
+        "action_weight_future_trend",
+        "action_weight_future_trend_reward",
     }
     if reward_key not in future_reward_keys:
         return 0
@@ -747,6 +764,9 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
     dwft_parameters = vec_env.env_method(
         method_name="save_dwft_parameter_memory"
     )[0]
+    awft_parameters = vec_env.env_method(
+        method_name="save_awft_parameter_memory"
+    )[0]
     rewards = rewards.copy()
     rewards.insert(0, "env_step", np.arange(1, len(rewards) + 1))
 
@@ -758,6 +778,7 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
     reward_path = OUTPUT_DIR / f"train_eval_reward_by_step_{suffix}.csv"
     weights_path = OUTPUT_DIR / f"train_eval_post_trade_weights_{suffix}.csv"
     dwft_parameters_path = OUTPUT_DIR / f"train_eval_dwft_parameters_{suffix}.csv"
+    awft_parameters_path = OUTPUT_DIR / f"train_eval_awft_parameters_{suffix}.csv"
     reward_boxplot_path = OUTPUT_DIR / f"train_eval_reward_parameter_boxplot_{suffix}.png"
     # 2026-08-08: train_eval_cumulative_reward_by_step 圖片暫停產出。
     # plot_path = OUTPUT_DIR / f"train_eval_cumulative_reward_by_step_{suffix}.png"
@@ -769,9 +790,20 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
             index=False,
             encoding="utf-8-sig",
         )
+    if awft_parameters is not None and not awft_parameters.empty:
+        awft_parameters.to_csv(
+            awft_parameters_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+    reward_parameters = (
+        awft_parameters
+        if awft_parameters is not None and not awft_parameters.empty
+        else dwft_parameters
+    )
     plot_reward_parameter_boxplot(
         rewards,
-        dwft_parameters,
+        reward_parameters,
         reward_boxplot_path,
         agent_name,
     )
@@ -789,6 +821,12 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
                 index=False,
                 encoding="utf-8-sig",
             )
+        if awft_parameters is not None and not awft_parameters.empty:
+            awft_parameters.to_csv(
+                OUTPUT_DIR / "train_eval_awft_parameters.csv",
+                index=False,
+                encoding="utf-8-sig",
+            )
         if reward_boxplot_path.exists():
             (OUTPUT_DIR / "train_eval_reward_parameter_boxplot.png").write_bytes(
                 reward_boxplot_path.read_bytes()
@@ -798,6 +836,8 @@ def evaluate_on_train_and_save_reward_curve(model, agent_name: str) -> None:
     print(f"Train evaluation reward by step saved to {reward_path}")
     if dwft_parameters is not None and not dwft_parameters.empty:
         print(f"Train evaluation DWFT parameters saved to {dwft_parameters_path}")
+    if awft_parameters is not None and not awft_parameters.empty:
+        print(f"Train evaluation AWFT parameters saved to {awft_parameters_path}")
     print(f"Train evaluation reward parameter box plot saved to {reward_boxplot_path}")
     print(f"Train evaluation post-trade weights saved to {weights_path}")
 

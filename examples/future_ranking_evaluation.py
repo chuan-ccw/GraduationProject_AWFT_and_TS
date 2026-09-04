@@ -64,6 +64,10 @@ def _normalize_reward_type(reward_type: str | None) -> str:
         "dwft": "v6",
         "delta_weighted_future_trend": "v6",
         "delta_weighted_future_trend_reward": "v6",
+        "reward_v7": "v7",
+        "awft": "v7",
+        "action_weight_future_trend": "v7",
+        "action_weight_future_trend_reward": "v7",
     }
     return aliases.get(key, key)
 
@@ -88,7 +92,7 @@ def _future_metric_name(reward_type: str, reward_params: dict[str, Any]) -> str:
     reward_key = _normalize_reward_type(reward_type)
     if reward_key == "v2":
         return "future_day_return"
-    if reward_key in {"v3", "v4", "v5"}:
+    if reward_key in {"v3", "v4", "v5", "v7"}:
         return "future_avg_return"
     if reward_key == "v6":
         future_variable = str(

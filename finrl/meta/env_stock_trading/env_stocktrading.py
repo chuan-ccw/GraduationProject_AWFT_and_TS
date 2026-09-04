@@ -13,6 +13,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from finrl.meta.env_stock_trading.reward_functions import (
     RewardContext,
+    calculate_awft_parameters,
     calculate_dwft_parameters,
     calculate_individual_reward_components,
     calculate_reward,
@@ -125,6 +126,7 @@ class StockTradingEnv(gym.Env):
         self.rewards_memory = []
         self.reward_components_memory = []
         self.dwft_parameter_memory = []
+        self.awft_parameter_memory = []
         self.last_episode_reward_components_memory = []
         self.last_episode_reward_component_dates = []
         self.actions_memory = []
@@ -554,6 +556,31 @@ class StockTradingEnv(gym.Env):
                         }
                     )
 
+            if reward_key in {
+                "v7",
+                "awft",
+                "action_weight_future_trend",
+                "action_weight_future_trend_reward",
+            }:
+                executed_actions, weights_used, future_signal, valid_mask = (
+                    calculate_awft_parameters(
+                        reward_context,
+                        self.reward_params,
+                    )
+                )
+                for index, tic in enumerate(tic_list):
+                    if not valid_mask[index]:
+                        continue
+                    self.awft_parameter_memory.append(
+                        {
+                            "date": trade_date,
+                            "tic": str(tic),
+                            "a": float(executed_actions[index]),
+                            "w": float(weights_used[index]),
+                            "d": float(future_signal[index]),
+                        }
+                    )
+
             self.previous_stock_weights_after_trade = (
                 stock_weights_after_trade.copy()
             )
@@ -607,6 +634,7 @@ class StockTradingEnv(gym.Env):
         self.rewards_memory = []
         self.reward_components_memory = []
         self.dwft_parameter_memory = []
+        self.awft_parameter_memory = []
         self.actions_memory = []
         self.agent_actions_memory = []
         self.state_memory = []
@@ -859,6 +887,13 @@ class StockTradingEnv(gym.Env):
         return pd.DataFrame(
             self.dwft_parameter_memory,
             columns=["date", "tic", "w", "delta_w", "d"],
+        )
+
+    def save_awft_parameter_memory(self):
+        """Return per-stock a, w, and d values actually used by AWFT."""
+        return pd.DataFrame(
+            self.awft_parameter_memory,
+            columns=["date", "tic", "a", "w", "d"],
         )
 
     def save_reward_memory(self):

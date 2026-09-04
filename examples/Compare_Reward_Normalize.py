@@ -33,14 +33,19 @@ EXPERIMENT_ROOT = os.environ.get(
 )
 SOURCE_A_FOLDER = os.environ.get(
     "REWARD_COMPARE_SOURCE_A",
-    "rolling_2018-2025_train3y_test1y_shift1y_20260818_141618_reinforce",
+    "rolling_2018-2025_train3y_test1y_shift1y_20260903_000326_reinforce", # v0 old
+    # "rolling_2018-2025_train3y_test1y_shift1y_20260819_220402_reinforce", # DWFT
 )
+# blue
+
 SOURCE_B_FOLDER = os.environ.get(
     "REWARD_COMPARE_SOURCE_B",
-    "rolling_2018-2025_train3y_test1y_shift1y_20260819_220402_reinforce",
+    "rolling_2018-2025_train3y_test1y_shift1y_20260902_001851_reinforce",
 )
+# red
+
 WINDOW_FILTER = os.environ.get("REWARD_COMPARE_WINDOW_FILTER", "")
-COMPARE_NAME = os.environ.get("REWARD_COMPARE_NAME", "FinRL_reward_vs_DWFT_reward_MaxAbs")
+COMPARE_NAME = os.environ.get("REWARD_COMPARE_NAME", "FinRL_reward_MaxAbs_vs_AWFT_reward_MaxAbs_200") # AWFT_reward_MaxAbs_90
 
 REWARD_DISPLAY_NAMES = {
     "v0": "FinRL_reward",
@@ -50,6 +55,7 @@ REWARD_DISPLAY_NAMES = {
     "v4": "future_avg_delta_action_reward",
     "v5": "WFT",
     "v6": "DWFT",
+    "v7": "AWFT",
 }
 
 

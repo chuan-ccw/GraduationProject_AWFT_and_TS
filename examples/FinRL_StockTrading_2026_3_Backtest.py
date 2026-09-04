@@ -58,7 +58,7 @@ def get_reward_scaling(reward_type: str) -> float:
     Choose reward_scaling by reward definition.
 
     v0 is a money-difference reward, so it keeps FinRL's original 1e-4.
-    v1/v2/v3/v4/v5/v6 are return-level rewards, so they should not be shrunk by 1e-4.
+    v1/v2/v3/v4/v5/v6/v7 are return-level rewards, so they should not be shrunk by 1e-4.
     """
     reward_key = str(reward_type).lower()
 
@@ -98,6 +98,11 @@ def get_reward_scaling(reward_type: str) -> float:
         "dwft",
         "delta_weighted_future_trend",
         "delta_weighted_future_trend_reward",
+        "v7",
+        "reward_v7",
+        "awft",
+        "action_weight_future_trend",
+        "action_weight_future_trend_reward",
     }:
         return 1.0
 
@@ -142,11 +147,16 @@ REWARD_DISPLAY_NAMES = {
     "dwft": "DWFT",
     "delta_weighted_future_trend": "DWFT",
     "delta_weighted_future_trend_reward": "DWFT",
+    "v7": "AWFT",
+    "reward_v7": "AWFT",
+    "awft": "AWFT",
+    "action_weight_future_trend": "AWFT",
+    "action_weight_future_trend_reward": "AWFT",
 }
 
 
 def reward_display_name(reward_type: str | None) -> str:
-    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5/v6."""
+    """Return the formal display name used in plots instead of reward version codes."""
     key = str(reward_type or "").strip().lower()
     if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
         key = key[len("reward_"):]
@@ -394,7 +404,7 @@ env_kwargs = {
 
 def plot_reward_parameter_boxplot(
     rewards: pd.DataFrame,
-    dwft_parameters: pd.DataFrame,
+    reward_parameters: pd.DataFrame,
     output_path: Path,
     agent_name: str,
 ) -> None:
@@ -402,9 +412,11 @@ def plot_reward_parameter_boxplot(
     box_values: list[np.ndarray] = []
     box_labels: list[str] = []
 
-    if dwft_parameters is not None and not dwft_parameters.empty:
-        for column, label in [("w", "w"), ("delta_w", "delta_w"), ("d", "d")]:
-            values = pd.to_numeric(dwft_parameters[column], errors="coerce").dropna()
+    if reward_parameters is not None and not reward_parameters.empty:
+        for column, label in [("a", "a"), ("w", "w"), ("delta_w", "delta_w"), ("d", "d")]:
+            if column not in reward_parameters.columns:
+                continue
+            values = pd.to_numeric(reward_parameters[column], errors="coerce").dropna()
             if not values.empty:
                 box_values.append(values.to_numpy(dtype=float))
                 box_labels.append(label)
@@ -481,6 +493,15 @@ def predict_and_collect(model, agent_name: str):
     dwft_parameters = test_env.env_method(
         method_name="save_dwft_parameter_memory"
     )[0]
+    awft_parameters = test_env.env_method(
+        method_name="save_awft_parameter_memory"
+    )[0]
+
+    reward_parameters = (
+        awft_parameters
+        if awft_parameters is not None and not awft_parameters.empty
+        else dwft_parameters
+    )
 
     save_agent_diagnostics(
         agent_name,
@@ -492,6 +513,8 @@ def predict_and_collect(model, agent_name: str):
         rewards,
         reward_components,
         dwft_parameters,
+        awft_parameters,
+        reward_parameters,
     )
     return account_value, actions, holdings, weights, rewards
 
@@ -506,6 +529,8 @@ def save_agent_diagnostics(
     rewards: pd.DataFrame,
     reward_components: pd.DataFrame,
     dwft_parameters: pd.DataFrame,
+    awft_parameters: pd.DataFrame,
+    reward_parameters: pd.DataFrame,
 ) -> None:
     suffix = f"{agent_name}_{REWARD_TYPE}_{TRADE_START_DATE}_to_{TRADE_END_DATE}_{today_str}"
 
@@ -532,10 +557,18 @@ def save_agent_diagnostics(
             encoding="utf-8-sig",
         )
 
+    awft_parameters_path = OUTPUT_DIR / f"awft_parameters_{suffix}.csv"
+    if awft_parameters is not None and not awft_parameters.empty:
+        awft_parameters.to_csv(
+            awft_parameters_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+
     reward_boxplot_path = OUTPUT_DIR / f"reward_parameter_boxplot_{suffix}.png"
     plot_reward_parameter_boxplot(
         rewards,
-        dwft_parameters,
+        reward_parameters,
         reward_boxplot_path,
         agent_name,
     )
@@ -667,6 +700,8 @@ def save_agent_diagnostics(
     print(f"Daily unscaled reward saved to {rewards_path}")
     if dwft_parameters is not None and not dwft_parameters.empty:
         print(f"DWFT parameters (w, delta_w, d) saved to {dwft_parameters_path}")
+    if awft_parameters is not None and not awft_parameters.empty:
+        print(f"AWFT parameters (a, w, d) saved to {awft_parameters_path}")
     print(f"Reward parameter box plot saved to {reward_boxplot_path}")
     print(f"Individual reward components saved to {reward_components_path}")
     print(f"Holdings saved to {holdings_path}")

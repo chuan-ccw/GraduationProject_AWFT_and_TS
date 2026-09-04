@@ -39,8 +39,9 @@ from future_ranking_evaluation import (
 #   "v4" = sum(effective delta action * future n-day average simple return)
 #   "v5" = Weighted-Future-Trend (WFT)
 #   "v6" = Delta-Weighted-Future-Trend (DWFT)
+#   "v7" = Action-Weight Future Trend Reward (AWFT)
 
-REWARD_TYPE = "v0"
+REWARD_TYPE = "v7"
 
 # reward v6 delta-weight variable switch:
 #   "original_delta_weight"   = today's post-trade weight minus the previous
@@ -53,6 +54,10 @@ V6_DELTA_WEIGHT_VARIABLE = "original_delta_weight"
 #   "future_direction"  = delta_w * signed future high-low range
 #   "future_avg_return" = delta_w * future n-day average return
 V6_FUTURE_VARIABLE = "future_avg_return"
+
+# reward v7 scale switch:
+# Only used when a == 0 and w > 0 in AWFT.
+AWFT_SCALE = 200
 
 REWARD_PARAMS_BY_TYPE = {
     "v0": {},
@@ -83,6 +88,11 @@ REWARD_PARAMS_BY_TYPE = {
         "price_col": "close",
         "future_variable": V6_FUTURE_VARIABLE,
         "delta_weight_variable": V6_DELTA_WEIGHT_VARIABLE,
+    },
+    "v7": {
+        "n_future": 60,
+        "price_col": "close",
+        "scale": AWFT_SCALE,
     },
 }
 
@@ -135,11 +145,16 @@ REWARD_DISPLAY_NAMES = {
     "dwft": "DWFT",
     "delta_weighted_future_trend": "DWFT",
     "delta_weighted_future_trend_reward": "DWFT",
+    "v7": "AWFT",
+    "reward_v7": "AWFT",
+    "awft": "AWFT",
+    "action_weight_future_trend": "AWFT",
+    "action_weight_future_trend_reward": "AWFT",
 }
 
 
 def reward_display_name(reward_type: str | None) -> str:
-    """Return the formal display name used in plots instead of v0/v1/v2/v3/v4/v5/v6."""
+    """Return the formal display name used in plots instead of reward version codes."""
     key = str(reward_type or "").strip().lower()
     if key.startswith("reward_") and key not in REWARD_DISPLAY_NAMES:
         key = key[len("reward_"):]
@@ -148,7 +163,7 @@ def reward_display_name(reward_type: str | None) -> str:
 
 def plot_reward_parameter_boxplot(
     rewards: pd.DataFrame,
-    dwft_parameters: pd.DataFrame,
+    reward_parameters: pd.DataFrame,
     output_path: Path,
     reward_type: str,
     title_suffix: str = "",
@@ -157,9 +172,11 @@ def plot_reward_parameter_boxplot(
     box_values: list[np.ndarray] = []
     box_labels: list[str] = []
 
-    if dwft_parameters is not None and not dwft_parameters.empty:
-        for column, label in [("w", "w"), ("delta_w", "delta_w"), ("d", "d")]:
-            values = pd.to_numeric(dwft_parameters[column], errors="coerce").dropna()
+    if reward_parameters is not None and not reward_parameters.empty:
+        for column, label in [("a", "a"), ("w", "w"), ("delta_w", "delta_w"), ("d", "d")]:
+            if column not in reward_parameters.columns:
+                continue
+            values = pd.to_numeric(reward_parameters[column], errors="coerce").dropna()
             if not values.empty:
                 box_values.append(values.to_numpy(dtype=float))
                 box_labels.append(label)
@@ -404,7 +421,7 @@ RUN_BACKTEST = True
 
 # 是否在 rolling 實驗結束後自動使用「最新」v0 與目前 REWARD_TYPE 產生比較圖。
 # 例如 REWARD_TYPE="v2" 時，會產生 v0 vs v2；
-# REWARD_TYPE="v5" 或 "v6" 時，也會自動比較對應版本。
+# REWARD_TYPE="v5"、"v6" 或 "v7" 時，也會自動比較對應版本。
 # 建議正式實驗設為 False，改用 examples/Compare_V0_V1_Manual.py 手動指定資料夾。
 AUTO_COMPARE_LATEST = False
 
@@ -1926,6 +1943,7 @@ def _run_continuous_window_agent(
     pd.DataFrame,
     pd.DataFrame,
     pd.DataFrame,
+    pd.DataFrame,
     float,
     dict[str, float],
     list[str],
@@ -2009,6 +2027,9 @@ def _run_continuous_window_agent(
     dwft_parameters = test_env.env_method(
         method_name="save_dwft_parameter_memory"
     )[0]
+    awft_parameters = test_env.env_method(
+        method_name="save_awft_parameter_memory"
+    )[0]
 
     if holdings.empty:
         raise ValueError(f"{trade_data_path} 產生的 holdings 記錄是空的。")
@@ -2028,6 +2049,7 @@ def _run_continuous_window_agent(
         rewards,
         reward_components,
         dwft_parameters,
+        awft_parameters,
         next_cash,
         next_shares_by_tic,
         tic_order,
@@ -2458,6 +2480,10 @@ def normalize_reward_type_for_continuous(value: str | None) -> str:
         "dwft": "v6",
         "delta_weighted_future_trend": "v6",
         "delta_weighted_future_trend_reward": "v6",
+        "reward_v7": "v7",
+        "awft": "v7",
+        "action_weight_future_trend": "v7",
+        "action_weight_future_trend_reward": "v7",
     }
     return aliases.get(text, text)
 
@@ -2534,6 +2560,7 @@ def run_continuous_5y_test(
                     rewards,
                     reward_components,
                     dwft_parameters,
+                    awft_parameters,
                     carried_cash,
                     carried_shares_by_tic,
                     tic_order,
@@ -2613,13 +2640,30 @@ def run_continuous_5y_test(
                     encoding="utf-8-sig",
                 )
 
+            window_awft_parameters_path = (
+                times_dir
+                / f"awft_parameters_window_{window['window_id']:02d}_{reward_type}.csv"
+            )
+            if awft_parameters is not None and not awft_parameters.empty:
+                awft_parameters.to_csv(
+                    window_awft_parameters_path,
+                    index=False,
+                    encoding="utf-8-sig",
+                )
+
+            reward_parameters = (
+                awft_parameters
+                if awft_parameters is not None and not awft_parameters.empty
+                else dwft_parameters
+            )
+
             window_reward_boxplot_path = (
                 times_dir
                 / f"reward_parameter_boxplot_window_{window['window_id']:02d}_{reward_type}.png"
             )
             plot_reward_parameter_boxplot(
                 rewards,
-                dwft_parameters,
+                reward_parameters,
                 window_reward_boxplot_path,
                 reward_type,
                 title_suffix=f"Window {int(window['window_id']):02d} / Times {times_index:02d}",
@@ -2651,6 +2695,11 @@ def run_continuous_5y_test(
                     "dwft_parameters_csv": (
                         str(window_dwft_parameters_path)
                         if dwft_parameters is not None and not dwft_parameters.empty
+                        else ""
+                    ),
+                    "awft_parameters_csv": (
+                        str(window_awft_parameters_path)
+                        if awft_parameters is not None and not awft_parameters.empty
                         else ""
                     ),
                     "reward_parameter_boxplot": str(window_reward_boxplot_path),

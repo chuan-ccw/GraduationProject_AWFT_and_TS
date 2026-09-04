@@ -12,7 +12,7 @@ from matplotlib.cbook import boxplot_stats
 
 # 從reward_data_collection抓資料畫box plot和統整csv
 
-FOLDER_INPUT = "rolling_2018-2025_train3y_test1y_shift1y_20260826_124138_reinforce"
+FOLDER_INPUT = "rolling_2018-2025_train3y_test1y_shift1y_20260903_104709_reinforce"
 
 # ============================================================
 # 1. 路徑設定
@@ -57,6 +57,11 @@ TICK_LABEL_SIZE = 10
 
 # CSV 檔名對應到圖片顯示名稱與 Y 軸名稱。
 CSV_CONFIG = {
+    "a": {
+        "display_name": "Action a",
+        "ylabel": "Action a",
+        "zero_comparison": True,
+    },
     "reward": {
         "display_name": "Step Reward",
         "ylabel": "Reward",
@@ -76,6 +81,25 @@ CSV_CONFIG = {
         "display_name": "Direction d",
         "ylabel": "Direction d",
         "zero_comparison": False,
+    },
+}
+
+AWFT_DISPLAY_CONFIG = {
+    "a": {
+        "display_name": "AWFT Action",
+        "ylabel": "Action a",
+    },
+    "w": {
+        "display_name": "AWFT Weight",
+        "ylabel": "Weight w",
+    },
+    "d": {
+        "display_name": "AWFT Future Trend",
+        "ylabel": "Future Trend d",
+    },
+    "reward": {
+        "display_name": "AWFT Reward",
+        "ylabel": "Reward",
     },
 }
 
@@ -130,7 +154,7 @@ def find_experiment_dir(folder_input):
     ]
 
     if not matches:
-        # 若未來 reward 資料夾不是 reward_v0 / reward_v6 形式，
+        # 若未來 reward 資料夾不是 reward_v0 / reward_v6 / reward_v7 形式，
         # 再做一次較寬鬆的搜尋。
         matches = [
             path
@@ -605,7 +629,7 @@ def draw_zero_comparison_boxplot(data, display_name, ylabel, output_dir, file_st
 # 14. 處理單一 Window
 # ============================================================
 
-def process_window(window_dir):
+def process_window(window_dir, reward_version=None):
     print("#" * 70)
     print(f"處理 Window：{window_dir.name}")
     print(f"位置：{window_dir}")
@@ -621,6 +645,12 @@ def process_window(window_dir):
             print(f"WARNING: 不支援的 CSV，跳過：{csv_file.name}")
             continue
 
+        display_name = config["display_name"]
+        ylabel = config["ylabel"]
+        if reward_version == "v7" and csv_file.stem in AWFT_DISPLAY_CONFIG:
+            display_name = AWFT_DISPLAY_CONFIG[csv_file.stem]["display_name"]
+            ylabel = AWFT_DISPLAY_CONFIG[csv_file.stem]["ylabel"]
+
         df = pd.read_csv(csv_file, encoding="utf-8-sig")
 
         if "value" not in df.columns:
@@ -630,16 +660,16 @@ def process_window(window_dir):
         if config["zero_comparison"]:
             rows = draw_zero_comparison_boxplot(
                 df["value"],
-                display_name=config["display_name"],
-                ylabel=config["ylabel"],
+                display_name=display_name,
+                ylabel=ylabel,
                 output_dir=window_dir,
                 file_stem=csv_file.stem,
             )
         else:
             rows = draw_full_boxplot(
                 df["value"],
-                display_name=config["display_name"],
-                ylabel=config["ylabel"],
+                display_name=display_name,
+                ylabel=ylabel,
                 output_dir=window_dir,
                 file_stem=csv_file.stem,
             )
@@ -696,8 +726,13 @@ def main():
     print(f"Window 數量：{len(window_dirs)}")
     print()
 
+    reward_version = None
+    parent_name = experiment_dir.parent.name.lower()
+    if parent_name.startswith("reward_v"):
+        reward_version = parent_name[len("reward_") :]
+
     for window_dir in window_dirs:
-        process_window(window_dir)
+        process_window(window_dir, reward_version=reward_version)
 
     print("=" * 70)
     print("全部圖片與統計 CSV 輸出完成")

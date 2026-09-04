@@ -806,6 +806,85 @@ def reward_v6(
     return float(np.sum(delta_weights[valid] * future_signal[valid]))
 
 
+def calculate_awft_parameters(
+    ctx: RewardContext,
+    params: Dict[str, Any] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return the exact per-stock a, w, and d values used by reward v7.
+
+    AWFT reuses DWFT's existing future-average-return calculation so the
+    future window and insufficient-future-data behavior stay identical.
+    """
+    params = params or {}
+    awft_params = dict(params)
+    awft_params["future_variable"] = "future_avg_return"
+
+    weights, _, future_signal, valid = calculate_dwft_parameters(
+        ctx,
+        awft_params,
+    )
+
+    executed_actions = ctx.executed_actions
+    if executed_actions is None:
+        actions_memory = getattr(ctx.env, "actions_memory", None)
+        if actions_memory:
+            executed_actions = actions_memory[-1]
+
+    if executed_actions is None:
+        raise ValueError(
+            "reward_v7 requires final executed actions after environment "
+            "cash/holding constraints are applied."
+        )
+
+    actions = np.asarray(executed_actions, dtype=float)
+    if actions.shape != weights.shape:
+        raise ValueError(
+            "executed_actions and stock_weights_after_trade must have the "
+            f"same shape, got {actions.shape} and {weights.shape}."
+        )
+
+    valid = valid & np.isfinite(actions)
+    return actions, weights, future_signal, valid
+
+
+def reward_v7(
+    ctx: RewardContext,
+    params: Dict[str, Any] | None = None,
+) -> float:
+    """Action-Weight Future Trend Reward (AWFT).
+
+    For each stock i:
+        a(i,t) != 0:
+            reward_i = a(i,t) * d(i,t)
+        a(i,t) == 0 and w(i,t) > 0:
+            reward_i = w(i,t) * d(i,t) * scale
+        otherwise:
+            reward_i = 0
+
+    a(i,t) is the final executed share count after cash/holding constraints.
+    w(i,t) is the post-trade portfolio weight already used by DWFT.
+    d(i,t) is DWFT's future_avg_return signal.
+    """
+    params = params or {}
+    scale = float(params.get("scale", 1.0))
+
+    actions, weights, future_signal, valid = calculate_awft_parameters(ctx, params)
+    if not np.any(valid):
+        return 0.0
+
+    components = np.zeros_like(future_signal, dtype=float)
+    trade_mask = valid & (actions != 0)
+    held_without_trade_mask = valid & (actions == 0) & (weights > 0)
+
+    components[trade_mask] = actions[trade_mask] * future_signal[trade_mask]
+    components[held_without_trade_mask] = (
+        weights[held_without_trade_mask]
+        * future_signal[held_without_trade_mask]
+        * scale
+    )
+    return float(np.sum(components[valid]))
+
+
 def calculate_individual_reward_components(
     reward_type: str,
     ctx: RewardContext,
@@ -814,7 +893,7 @@ def calculate_individual_reward_components(
     """Return each stock's contribution to the selected unscaled reward.
 
     The returned array has one value per stock and is calculated from the same
-    inputs/formula used by reward_v0 ... reward_v6. Summing the valid stock
+    inputs/formula used by reward_v0 ... reward_v7. Summing the valid stock
     components reproduces the corresponding portfolio reward (up to floating
     point rounding).
     """
@@ -847,6 +926,9 @@ def calculate_individual_reward_components(
         "dwft": "v6",
         "delta_weighted_future_trend": "v6",
         "delta_weighted_future_trend_reward": "v6",
+        "awft": "v7",
+        "action_weight_future_trend": "v7",
+        "action_weight_future_trend_reward": "v7",
     }
     key = aliases.get(key, key)
 
@@ -1107,6 +1189,20 @@ def calculate_individual_reward_components(
         components[valid] = delta_weights[valid] * future_signal[valid]
         return components
 
+    if key == "v7":
+        actions, weights, future_signal, valid = calculate_awft_parameters(ctx, params)
+        scale = float(params.get("scale", 1.0))
+        components = zeros.copy()
+        trade_mask = valid & (actions != 0)
+        held_without_trade_mask = valid & (actions == 0) & (weights > 0)
+        components[trade_mask] = actions[trade_mask] * future_signal[trade_mask]
+        components[held_without_trade_mask] = (
+            weights[held_without_trade_mask]
+            * future_signal[held_without_trade_mask]
+            * scale
+        )
+        return components
+
     raise ValueError(f"Unsupported reward_type for individual components: {reward_type!r}")
 
 
@@ -1115,6 +1211,9 @@ reward_weight_future = reward_v5
 
 # Formal and compatibility function names for reward v6.
 reward_weight_change_future = reward_v6
+
+# Formal and compatibility function name for reward v7.
+reward_action_weight_future = reward_v7
 
 
 REWARD_FUNCTIONS = {
@@ -1159,6 +1258,12 @@ REWARD_FUNCTIONS = {
     "dwft": reward_v6,
     "delta_weighted_future_trend": reward_v6,
     "delta_weighted_future_trend_reward": reward_v6,
+
+    "v7": reward_v7,
+    "reward_v7": reward_v7,
+    "awft": reward_v7,
+    "action_weight_future_trend": reward_v7,
+    "action_weight_future_trend_reward": reward_v7,
 }
 
 

@@ -39,23 +39,23 @@ EXPERIMENT_ROOT = os.environ.get(
 # r"C:\Users\User\Desktop\GraduationProject\Experence_result\reward_v0\rolling_..."
 # 也可只填 rolling_* 資料夾名稱。
 SOURCE_1 = {
-    "label": "DWFT_reward_8-REINFORCE",
-    "reward_type": "v6",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260819_220402_reinforce",
+    "label": "AWFT_reward-REINFORCE",
+    "reward_type": "v7",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260902_001851_reinforce",
     "color": "blue",
 }
 
 SOURCE_2 = {
-    "label": "DWFT_reward_25-REINFORCE",
-    "reward_type": "v6",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260818_193551_reinforce",
+    "label": "AWFT_reward-REINFORCE",
+    "reward_type": "v7",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260903_104709_reinforce",
     "color": "red",
 }
 
 SOURCES = [SOURCE_1, SOURCE_2]
 
 # "annual_reset" 或 "continuous_5y"
-COMPARE_DATA_MODE = "annual_reset"
+COMPARE_DATA_MODE = "continuous_5y"
 
 # 留空會自動使用時間戳記建立資料夾。
 COMPARE_NAME = ""

@@ -9,6 +9,8 @@ import pandas as pd
 # reward_by_step_reinforce_v0_*.csv
 # dwft_parameters_reinforce_v6_*.csv
 # reward_by_step_reinforce_v6_*.csv
+# awft_parameters_reinforce_v7_*.csv
+# reward_by_step_reinforce_v7_*.csv
 # 蒐集資料統整至reward_data_collection資料夾
 
 # =====================================================
@@ -20,7 +22,7 @@ EXPERIMENT_ROOT = Path(
 )
 
 TARGET_FOLDER = (
-    "rolling_2018-2025_train3y_test1y_shift1y_20260825_230654_reinforce"
+    "rolling_2018-2025_train3y_test1y_shift1y_20260903_104709_reinforce"
 )
 
 
@@ -44,13 +46,23 @@ REWARD_DATA_SOURCES = {
             "reward": "step_reward_unscaled",
         },
     },
+    "v7": {
+        "awft_parameters_reinforce_v7_*.csv": {
+            "a": "a",
+            "w": "w",
+            "d": "d",
+        },
+        "reward_by_step_reinforce_v7_*.csv": {
+            "reward": "step_reward_unscaled",
+        },
+    },
 }
 
 WINDOW_PATTERN = re.compile(r"^window_(?P<id>\d+)(?:_|$)")
 TIMES_PATTERN = re.compile(r"^times_(?P<id>\d+)_seed_.+$")
 REWARD_PARENT_PATTERN = re.compile(r"^reward_(?P<version>v\d+)$", re.IGNORECASE)
 SOURCE_VERSION_PATTERN = re.compile(
-    r"^(?:reward_by_step|dwft_parameters)_reinforce_(?P<version>v\d+)_.*\.csv$",
+    r"^(?:reward_by_step|dwft_parameters|awft_parameters)_reinforce_(?P<version>v\d+)_.*\.csv$",
     re.IGNORECASE,
 )
 
@@ -96,7 +108,7 @@ def detect_reward_version(rolling_root: Path) -> str | None:
         print("ERROR: Unable to determine Reward Version from parent folder.")
         print(f"  Rolling Folder: {rolling_root}")
         print(f"  Parent Folder: {rolling_root.parent.name}")
-        print("  Expected Parent: reward_v0 or reward_v6")
+        print("  Expected Parent: reward_v0, reward_v6, or reward_v7")
         return None
 
     reward_version = parent_match.group("version").lower()

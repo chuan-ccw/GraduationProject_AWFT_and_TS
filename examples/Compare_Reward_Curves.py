@@ -43,6 +43,7 @@ REWARD_DISPLAY_NAMES = {
     "v4": "future_avg_delta_action_reward",
     "v5": "WFT",
     "v6": "DWFT",
+    "v7": "AWFT",
 }
 
 
@@ -223,6 +224,7 @@ def source_label(metadata: dict[str, object], fallback: str) -> str:
             "delta_weight_variable",
             "future_variable",
             "n_future",
+            "scale",
             "c",
             "alpha",
             "beta",
@@ -321,8 +323,11 @@ def main() -> None:
     metadata_b = load_experiment_metadata(source_b)
     # label_a = source_label(metadata_a, source_a.name)
     label_a = "FinRL_reward-REINFORCE"
-    # label_b = source_label(metadata_b, source_b.name)
-    label_b = "DWFT_reward-REINFORCE"
+    if reward_display_name(str(metadata_b.get("reward_type", ""))) == "AWFT":
+        label_b = source_label(metadata_b, source_b.name)
+    else:
+        # Keep the existing DWFT comparison label unchanged for old experiments.
+        label_b = "DWFT_reward-REINFORCE"
     compare_dir = make_compare_dir(source_a, source_b)
 
     manifest_rows: list[dict[str, object]] = []

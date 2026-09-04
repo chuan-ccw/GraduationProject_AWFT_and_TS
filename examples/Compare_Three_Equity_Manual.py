@@ -39,23 +39,23 @@ EXPERIMENT_ROOT = os.environ.get(
 # r"C:\Users\User\Desktop\GraduationProject\Experence_result\reward_v0\rolling_..."
 # 也可只填 rolling_* 資料夾名稱。
 SOURCE_1 = {
-    "label": "original_reward",
+    "label": "FinRL_reward",
     "reward_type": "v0",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260810_231458_reinforce",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260903_000326_reinforce",
     "color": "blue",
 }
 
 SOURCE_2 = {
-    "label": "v3 n=60",
-    "reward_type": "v3",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260811_234827_reinforce",
+    "label": "AWFT scale = 200",
+    "reward_type": "v7",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260902_001851_reinforce",
     "color": "red",
 }
 
 SOURCE_3 = {
-    "label": "DWFT n=60",
+    "label": "DWFT_reward",
     "reward_type": "v6",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260811_142912_reinforce",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260819_220402_reinforce",
     "color": "black",
 }
 
