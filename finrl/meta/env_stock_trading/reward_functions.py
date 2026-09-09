@@ -855,9 +855,9 @@ def reward_v7(
 
     For each stock i:
         a(i,t) != 0:
-            reward_i = a(i,t) * d(i,t)
+            reward_i = a(i,t) * d(i,t) * scale
         a(i,t) == 0 and w(i,t) > 0:
-            reward_i = w(i,t) * d(i,t) * scale
+            reward_i = w(i,t) * d(i,t)
         otherwise:
             reward_i = 0
 
@@ -876,11 +876,14 @@ def reward_v7(
     trade_mask = valid & (actions != 0)
     held_without_trade_mask = valid & (actions == 0) & (weights > 0)
 
-    components[trade_mask] = actions[trade_mask] * future_signal[trade_mask]
+    components[trade_mask] = (
+        actions[trade_mask]
+        * future_signal[trade_mask]
+        * scale
+    )
     components[held_without_trade_mask] = (
         weights[held_without_trade_mask]
         * future_signal[held_without_trade_mask]
-        * scale
     )
     return float(np.sum(components[valid]))
 
@@ -1195,11 +1198,14 @@ def calculate_individual_reward_components(
         components = zeros.copy()
         trade_mask = valid & (actions != 0)
         held_without_trade_mask = valid & (actions == 0) & (weights > 0)
-        components[trade_mask] = actions[trade_mask] * future_signal[trade_mask]
+        components[trade_mask] = (
+            actions[trade_mask]
+            * future_signal[trade_mask]
+            * scale
+        )
         components[held_without_trade_mask] = (
             weights[held_without_trade_mask]
             * future_signal[held_without_trade_mask]
-            * scale
         )
         return components
 

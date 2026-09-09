@@ -67,11 +67,14 @@ config.print_observation_feature_mode()
 print("\n=== DOW 30 Tickers ===")
 print(config_tickers.DOW_30_TICKER)
 
-# Future Ranking must still have n_future trading days available after the
-# Test period. Download a calendar-day buffer only for the objective ranking
-# source; the model train/trade datasets below remain clipped to TRADE_END_DATE.
+# Future Ranking and ATDS both need future prices after the Test period.
+# ATDS uses d(i,t) with n=60, so always keep at least 60 future trading days.
+# Download a calendar-day buffer only for the evaluation price source; the
+# model train/trade datasets below remain clipped to TRADE_END_DATE.
+ATDS_N_FUTURE = 60
 n_future = max(1, int(FUTURE_RANKING_PARAMS.get("n_future", 60)))
-future_buffer_days = max(30, n_future * 3)
+evaluation_n_future = max(n_future, ATDS_N_FUTURE)
+future_buffer_days = max(30, evaluation_n_future * 3)
 ranking_download_end = (
     pd.Timestamp(TRADE_END_DATE) + pd.Timedelta(days=future_buffer_days)
 ).strftime("%Y-%m-%d")
@@ -94,12 +97,12 @@ future_ranking_data = df_raw.loc[
 ].copy()
 future_ranking_data.to_csv(FUTURE_RANKING_DATA_PATH, index=False, encoding="utf-8-sig")
 print(
-    "Future Ranking price data saved to "
+    "Future Ranking / ATDS price data saved to "
     f"{FUTURE_RANKING_DATA_PATH} (through {ranking_download_end})"
 )
 
 # Preserve the original model-data boundary exactly; the extra future rows
-# above are only for Future Ranking and are never passed into the environment.
+# above are only for Future Ranking / ATDS and are never passed into the environment.
 df_raw = df_raw[df_raw["date"] < TRADE_END_DATE].copy()
 
 # %% Part 3. Preprocess data

@@ -10,10 +10,11 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from matplotlib.cbook import boxplot_stats
 
-# 從 reward_data_collection 抓取 AWFT 的 a / w 資料，
+# 從 reward_data_collection 抓取 AWFT 的 a / w 資料， 紀錄 畫圖(暫時小功能)
+
 # 篩選指定集合後畫 box plot 並輸出統計資料。
 
-FOLDER_INPUT = "rolling_2018-2025_train3y_test1y_shift1y_20260903_104709_reinforce"
+FOLDER_INPUT = "rolling_2018-2025_train3y_test1y_shift1y_20260904_234026_reinforce"
 
 
 # ============================================================

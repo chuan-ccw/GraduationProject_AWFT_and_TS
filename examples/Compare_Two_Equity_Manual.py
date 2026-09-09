@@ -39,16 +39,16 @@ EXPERIMENT_ROOT = os.environ.get(
 # r"C:\Users\User\Desktop\GraduationProject\Experence_result\reward_v0\rolling_..."
 # 也可只填 rolling_* 資料夾名稱。
 SOURCE_1 = {
-    "label": "AWFT_reward-REINFORCE",
-    "reward_type": "v7",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260902_001851_reinforce",
+    "label": "FinRL_reward-REINFORCE",
+    "reward_type": "v0",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260903_000326_reinforce",
     "color": "blue",
 }
 
 SOURCE_2 = {
     "label": "AWFT_reward-REINFORCE",
     "reward_type": "v7",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260903_104709_reinforce",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260904_234026_reinforce",
     "color": "red",
 }
 
@@ -60,7 +60,6 @@ COMPARE_DATA_MODE = "continuous_5y"
 # 留空會自動使用時間戳記建立資料夾。
 COMPARE_NAME = ""
 
-MAX_XTICKS = 14
 
 
 # =====================================================
@@ -173,6 +172,96 @@ def _strategy_return_percent(series: pd.Series) -> float:
     return (float(valid.iloc[-1]) - 1.0) * 100.0
 
 
+def _plot_equity_line(
+    ax,
+    x: np.ndarray,
+    dates: pd.Series,
+    values: pd.Series,
+    *,
+    color: str,
+    linewidth: float,
+    label: str,
+) -> None:
+    """Plot annual-reset years as separate segments so year boundaries stay disconnected."""
+    numeric = pd.to_numeric(values, errors="coerce").to_numpy(dtype=float)
+    mode = str(COMPARE_DATA_MODE or "").strip().lower()
+
+    if mode not in {"annual_reset", "times"}:
+        ax.plot(x, numeric, color=color, linewidth=linewidth, label=label)
+        return
+
+    years = pd.to_datetime(dates, errors="coerce").dt.year.to_numpy()
+    label_used = False
+    for year in pd.unique(years[pd.notna(years)]):
+        mask = (years == year) & np.isfinite(numeric)
+        positions = np.flatnonzero(mask)
+        if len(positions) == 0:
+            continue
+        ax.plot(
+            x[positions],
+            numeric[positions],
+            color=color,
+            linewidth=linewidth,
+            label=label if not label_used else "_nolegend_",
+        )
+        label_used = True
+
+
+def _plot_annual_reset_boundaries(ax, dates: pd.Series) -> None:
+    """Draw each year boundary at the first data point of the new year."""
+    mode = str(COMPARE_DATA_MODE or "").strip().lower()
+    if mode not in {
+        "annual_reset",
+        "times",
+        "continuous",
+        "continuous_5y",
+        "continuous5y",
+    }:
+        return
+
+    years = pd.to_datetime(dates, errors="coerce").dt.year.to_numpy()
+    for position in range(1, len(years)):
+        previous_year = years[position - 1]
+        current_year = years[position]
+        if pd.notna(previous_year) and pd.notna(current_year) and previous_year != current_year:
+            ax.axvline(
+                position,
+                color="gray",
+                linestyle="--",
+                linewidth=1.1,
+                zorder=0,
+            )
+
+
+def _set_jan_may_sep_xticks(ax, dates: pd.Series) -> None:
+    """Show Jan/May/Sep at each month's first available data point."""
+    parsed_dates = pd.to_datetime(dates, errors="coerce")
+
+    tick_positions: list[int] = []
+    tick_labels: list[str] = []
+    seen_year_month: set[tuple[int, int]] = set()
+
+    for position, date in enumerate(parsed_dates):
+        if pd.isna(date) or date.month not in {1, 5, 9}:
+            continue
+
+        year_month = (date.year, date.month)
+        if year_month in seen_year_month:
+            continue
+
+        seen_year_month.add(year_month)
+        tick_positions.append(position)
+        tick_labels.append(f"{date.year}-{date.month:02d}")
+
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_labels)
+
+    # Left alignment keeps the label text starting exactly at the month's
+    # first plotted data point. January therefore aligns with the year line.
+    for label in ax.get_xticklabels():
+        label.set_horizontalalignment("left")
+
+
 def make_compare_dir() -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if COMPARE_NAME.strip():
@@ -192,19 +281,12 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path) -> None:
     for index, source in enumerate(SOURCES, start=1):
         key = f"source{index}"
         mean = pd.to_numeric(merged[f"{key}_mean"], errors="coerce")
-        min_v = pd.to_numeric(merged[f"{key}_min"], errors="coerce")
-        max_v = pd.to_numeric(merged[f"{key}_max"], errors="coerce")
         ret = _strategy_return_percent(mean)
 
-        ax.fill_between(
+        _plot_equity_line(
+            ax,
             x,
-            min_v,
-            max_v,
-            color=source["color"],
-            alpha=0.14,
-        )
-        ax.plot(
-            x,
+            merged["date"],
             mean,
             color=source["color"],
             linewidth=2.2,
@@ -214,8 +296,10 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path) -> None:
     dji = pd.to_numeric(merged["dji_mean_norm"], errors="coerce")
     if dji.notna().any():
         ret = _strategy_return_percent(dji)
-        ax.plot(
+        _plot_equity_line(
+            ax,
             x,
+            merged["date"],
             dji,
             color="tab:green",
             linewidth=1.8,
@@ -223,11 +307,8 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path) -> None:
         )
 
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=1.1)
-    legacy_compare.set_month_xticklabels(
-        ax,
-        merged["date"].tolist(),
-        max_xticks=MAX_XTICKS,
-    )
+    _plot_annual_reset_boundaries(ax, merged["date"])
+    _set_jan_may_sep_xticks(ax, merged["date"])
 
     title_mode = (
         "Continuous 5-Year Test"

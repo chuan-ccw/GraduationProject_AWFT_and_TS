@@ -31,6 +31,10 @@ calculate_stock_weights_after_trade = (
 calculate_reward = _REWARD_MODULE.calculate_reward
 reward_v5 = _REWARD_MODULE.reward_v5
 reward_v6 = _REWARD_MODULE.reward_v6
+reward_v7 = _REWARD_MODULE.reward_v7
+calculate_individual_reward_components = (
+    _REWARD_MODULE.calculate_individual_reward_components
+)
 reward_v3 = _REWARD_MODULE.reward_v3
 
 
@@ -362,3 +366,52 @@ def test_reward_v6_rejects_unknown_delta_weight_variable() -> None:
             "reward_v6 should reject an unknown delta_weight_variable"
         )
 
+
+
+def test_reward_v7_applies_scale_only_to_trade_branch() -> None:
+    env = SimpleNamespace(df=_make_v3_price_df(), hmax=100, stock_dim=2)
+    ctx = RewardContext(
+        env=env,
+        begin_total_asset=800.0,
+        end_total_asset=800.0,
+        raw_actions=np.array([0.0, 0.0]),
+        current_prices_before_trade=np.array([10.0, 20.0]),
+        stock_weights_after_trade=np.array([0.40, 0.25]),
+        previous_stock_weights_after_trade=np.array([0.40, 0.25]),
+        cost_before_trade=0.0,
+        current_day=0,
+        tic_list=["AAA", "BBB"],
+        executed_actions=np.array([2.0, 0.0]),
+    )
+
+    reward = reward_v7(
+        ctx,
+        {"n_future": 2, "price_col": "close", "scale": 3.0},
+    )
+
+    # AAA trades: 2 * 20% * 3 = 1.20.
+    # BBB is held without trading: 0.25 * (-10%) = -0.025.
+    assert np.isclose(reward, 1.175)
+
+
+def test_reward_v7_individual_components_match_reward_formula() -> None:
+    env = SimpleNamespace(df=_make_v3_price_df(), hmax=100, stock_dim=2)
+    ctx = RewardContext(
+        env=env,
+        begin_total_asset=800.0,
+        end_total_asset=800.0,
+        raw_actions=np.array([0.0, 0.0]),
+        current_prices_before_trade=np.array([10.0, 20.0]),
+        stock_weights_after_trade=np.array([0.40, 0.25]),
+        previous_stock_weights_after_trade=np.array([0.40, 0.25]),
+        cost_before_trade=0.0,
+        current_day=0,
+        tic_list=["AAA", "BBB"],
+        executed_actions=np.array([2.0, 0.0]),
+    )
+    params = {"n_future": 2, "price_col": "close", "scale": 3.0}
+
+    components = calculate_individual_reward_components("v7", ctx, params)
+
+    np.testing.assert_allclose(components, np.array([1.20, -0.025]))
+    assert np.isclose(np.sum(components), reward_v7(ctx, params))

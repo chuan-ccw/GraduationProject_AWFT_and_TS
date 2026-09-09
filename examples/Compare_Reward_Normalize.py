@@ -40,12 +40,12 @@ SOURCE_A_FOLDER = os.environ.get(
 
 SOURCE_B_FOLDER = os.environ.get(
     "REWARD_COMPARE_SOURCE_B",
-    "rolling_2018-2025_train3y_test1y_shift1y_20260902_001851_reinforce",
+    "rolling_2018-2025_train3y_test1y_shift1y_20260904_234026_reinforce",
 )
 # red
 
 WINDOW_FILTER = os.environ.get("REWARD_COMPARE_WINDOW_FILTER", "")
-COMPARE_NAME = os.environ.get("REWARD_COMPARE_NAME", "FinRL_reward_MaxAbs_vs_AWFT_reward_MaxAbs_200") # AWFT_reward_MaxAbs_90
+COMPARE_NAME = os.environ.get("REWARD_COMPARE_NAME", "FinRL_reward_MaxAbs_vs_AWFT_reward_v2_MaxAbs_200") # AWFT_reward_MaxAbs_90
 
 REWARD_DISPLAY_NAMES = {
     "v0": "FinRL_reward",

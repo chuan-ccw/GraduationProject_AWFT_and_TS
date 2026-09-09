@@ -56,8 +56,8 @@ V6_DELTA_WEIGHT_VARIABLE = "original_delta_weight"
 V6_FUTURE_VARIABLE = "future_avg_return"
 
 # reward v7 scale switch:
-# Only used when a == 0 and w > 0 in AWFT.
-AWFT_SCALE = 200
+# Only used when a != 0 in AWFT.
+AWFT_SCALE = 1/200
 
 REWARD_PARAMS_BY_TYPE = {
     "v0": {},

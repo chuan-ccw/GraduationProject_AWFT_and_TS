@@ -12,7 +12,7 @@ from matplotlib.cbook import boxplot_stats
 
 # 從reward_data_collection抓資料畫box plot和統整csv
 
-FOLDER_INPUT = "rolling_2018-2025_train3y_test1y_shift1y_20260903_104709_reinforce"
+FOLDER_INPUT = "rolling_2018-2025_train3y_test1y_shift1y_20260904_234026_reinforce"
 
 # ============================================================
 # 1. 路徑設定
