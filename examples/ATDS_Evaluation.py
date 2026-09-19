@@ -17,7 +17,7 @@ EXPERIMENT_ROOT = Path(
 )
 
 TARGET_FOLDER = (
-    "rolling_2018-2025_train3y_test1y_shift1y_20260904_234026_reinforce"
+    "rolling_2018-2025_train3y_test1y_shift1y_20260917_010528_reinforce"
     # "rolling_2018-2025_train3y_test1y_shift1y_20260903_000326_reinforce" #v0
 )
 
