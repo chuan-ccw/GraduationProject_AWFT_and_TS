@@ -25,6 +25,9 @@ from future_ranking_evaluation import (
     build_times_future_ranking_evaluation,
     build_window_future_ranking_summary,
 )
+from finrl.meta.env_stock_trading.trading_score import (
+    calculate_cumulative_ts_versions,
+)
 
 
 # =====================================================
@@ -2488,6 +2491,84 @@ def normalize_reward_type_for_continuous(value: str | None) -> str:
     return aliases.get(text, text)
 
 
+TS_N_FUTURE = 60
+
+
+def _continuous_ts_action_matrix(actions: pd.DataFrame) -> pd.DataFrame:
+    """Return executed continuous-test actions as date-indexed stock columns."""
+    if actions.empty:
+        raise ValueError("Continuous TS action table is empty")
+
+    if "date" in actions.columns:
+        action_matrix = actions.set_index("date").copy()
+    else:
+        action_matrix = actions.copy()
+
+    action_matrix.index = pd.to_datetime(
+        action_matrix.index.astype(str),
+        errors="coerce",
+    ).strftime("%Y-%m-%d")
+    action_matrix = action_matrix[action_matrix.index.notna()].copy()
+    action_matrix = action_matrix.apply(pd.to_numeric, errors="coerce")
+    if action_matrix.isna().any().any():
+        raise ValueError("Continuous TS action table contains non-numeric values")
+    return action_matrix
+
+
+def _load_continuous_ts_price_pivot(
+    experiment_dir: Path,
+    stock_columns: list[str],
+) -> pd.DataFrame:
+    """Load the price source with the future rows required by TS."""
+    data_dir = experiment_dir / "data"
+    candidates = [
+        data_dir / "ts_price_data.csv",
+        data_dir / "future_ranking_price_data.csv",
+        data_dir / "atds_price_data.csv",  # legacy experiments
+    ]
+    price_path = next((path for path in candidates if path.exists()), None)
+    if price_path is None:
+        raise FileNotFoundError(
+            f"Continuous TS cannot find future price data under {data_dir}"
+        )
+
+    data = pd.read_csv(price_path)
+    if data.empty or not {"date", "tic"}.issubset(data.columns):
+        raise ValueError(f"Invalid TS price data: {price_path}")
+
+    price_col = "close" if "close" in data.columns else str(
+        FUTURE_RANKING_PARAMS.get("price_col", "close")
+    )
+    if price_col not in data.columns:
+        raise ValueError(f"TS price column {price_col!r} not found in {price_path}")
+
+    data = data[["date", "tic", price_col]].copy()
+    data["date"] = pd.to_datetime(data["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    data = data[data["date"].notna()].copy()
+    data["tic"] = data["tic"].astype(str)
+    data[price_col] = pd.to_numeric(data[price_col], errors="coerce")
+
+    pivot = data.pivot_table(
+        index="date",
+        columns="tic",
+        values=price_col,
+        aggfunc="last",
+    ).sort_index()
+    return pivot.reindex(columns=stock_columns)
+
+
+def _merge_continuous_ts_price_pivots(
+    price_pivots: list[pd.DataFrame],
+) -> pd.DataFrame:
+    if not price_pivots:
+        raise ValueError("No continuous TS price data was collected")
+
+    combined = price_pivots[0].copy()
+    for pivot in price_pivots[1:]:
+        combined = combined.combine_first(pivot)
+    return combined.sort_index()
+
+
 def run_continuous_5y_test(
     rolling_root: Path,
     windows: list[dict[str, Any]],
@@ -2525,6 +2606,9 @@ def run_continuous_5y_test(
         carried_cash = float(initial_cash)
         carried_shares_by_tic: dict[str, float] = {}
         account_frames: list[pd.DataFrame] = []
+        cumulative_ts_action_frames: list[pd.DataFrame] = []
+        cumulative_ts_price_pivots: list[pd.DataFrame] = []
+        cumulative_ts_stock_order: list[str] | None = None
 
         print("-" * 80)
         print(
@@ -2613,6 +2697,26 @@ def run_continuous_5y_test(
 
             window_actions_path = times_dir / f"actions_window_{window['window_id']:02d}_{reward_type}.csv"
             actions.to_csv(window_actions_path, index=True, encoding="utf-8-sig")
+
+            ts_action_matrix = _continuous_ts_action_matrix(actions)
+            current_stock_order = [str(column) for column in ts_action_matrix.columns]
+            if cumulative_ts_stock_order is None:
+                cumulative_ts_stock_order = current_stock_order
+            elif set(current_stock_order) != set(cumulative_ts_stock_order):
+                raise ValueError(
+                    "Continuous 5Y windows use different stock universes; "
+                    "Cumulative TS requires a consistent stock universe."
+                )
+            ts_action_matrix = ts_action_matrix.reindex(
+                columns=cumulative_ts_stock_order
+            )
+            cumulative_ts_action_frames.append(ts_action_matrix)
+            cumulative_ts_price_pivots.append(
+                _load_continuous_ts_price_pivot(
+                    experiment_dir=experiment_dir,
+                    stock_columns=cumulative_ts_stock_order,
+                )
+            )
             window_holdings_path = times_dir / f"holdings_window_{window['window_id']:02d}_{reward_type}.csv"
             holdings.to_csv(window_holdings_path, index=False, encoding="utf-8-sig")
             window_weights_path = times_dir / f"post_trade_weights_window_{window['window_id']:02d}_{reward_type}.csv"
@@ -2744,6 +2848,41 @@ def run_continuous_5y_test(
         times_result.to_csv(times_csv, index=False, encoding="utf-8-sig")
         times_result.to_csv(times_dated_csv, index=False, encoding="utf-8-sig")
 
+        if cumulative_ts_stock_order is None or not cumulative_ts_action_frames:
+            raise ValueError("No continuous actions were collected for Cumulative TS")
+
+        cumulative_ts_actions = pd.concat(cumulative_ts_action_frames, axis=0)
+        cumulative_ts_actions = cumulative_ts_actions[
+            ~cumulative_ts_actions.index.duplicated(keep="last")
+        ].sort_index()
+        cumulative_ts_prices = _merge_continuous_ts_price_pivots(
+            cumulative_ts_price_pivots
+        ).reindex(columns=cumulative_ts_stock_order)
+
+        cumulative_scores, cumulative_daily, cumulative_detail = (
+            calculate_cumulative_ts_versions(
+                action_values=cumulative_ts_actions,
+                price_pivot=cumulative_ts_prices,
+                n_future=TS_N_FUTURE,
+            )
+        )
+        cumulative_daily_path = times_dir / "cumulative_ts_daily.csv"
+        cumulative_detail_path = times_dir / "cumulative_ts_stock_detail.csv"
+        cumulative_daily.to_csv(
+            cumulative_daily_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+        cumulative_detail.to_csv(
+            cumulative_detail_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+        print(
+            f"Cumulative TS = {cumulative_scores['Cumulative_TS']:.6f} | "
+            f"Cumulative TS_v2 = {cumulative_scores['Cumulative_TS_v2']:.6f}"
+        )
+
         valid = pd.to_numeric(times_result["strategy_continuous_norm"], errors="coerce").dropna()
         times_summary_rows.append(
             {
@@ -2754,6 +2893,10 @@ def run_continuous_5y_test(
                 "initial_cash": initial_cash,
                 "final_normalized_value": float(valid.iloc[-1]) if not valid.empty else np.nan,
                 "return_percent": float((valid.iloc[-1] - 1) * 100) if not valid.empty else np.nan,
+                "Cumulative_TS": cumulative_scores["Cumulative_TS"],
+                "Cumulative_TS_v2": cumulative_scores["Cumulative_TS_v2"],
+                "cumulative_ts_daily_csv": str(cumulative_daily_path),
+                "cumulative_ts_stock_detail_csv": str(cumulative_detail_path),
                 "times_csv": str(times_csv),
                 "predict_deterministic": TEST_PREDICT_DETERMINISTIC,
             }
@@ -2824,8 +2967,28 @@ def run_continuous_5y_test(
 
     times_summary_path = out_dir / "continuous_times_summary.csv"
     window_summary_path = out_dir / "continuous_window_summary.csv"
-    pd.DataFrame(times_summary_rows).to_csv(times_summary_path, index=False, encoding="utf-8-sig")
+    times_summary_df = pd.DataFrame(times_summary_rows)
+    times_summary_df.to_csv(times_summary_path, index=False, encoding="utf-8-sig")
     pd.DataFrame(window_summary_rows).to_csv(window_summary_path, index=False, encoding="utf-8-sig")
+
+    cumulative_ts_summary_path = out_dir / "cumulative_ts_summary.csv"
+    if not times_summary_df.empty:
+        cumulative_ts_summary = times_summary_df[
+            ["times_index", "random_seed", "Cumulative_TS", "Cumulative_TS_v2"]
+        ].copy()
+        cumulative_ts_summary.loc[len(cumulative_ts_summary)] = {
+            "times_index": "Average",
+            "random_seed": np.nan,
+            "Cumulative_TS": float(cumulative_ts_summary["Cumulative_TS"].mean()),
+            "Cumulative_TS_v2": float(
+                cumulative_ts_summary["Cumulative_TS_v2"].mean()
+            ),
+        }
+        cumulative_ts_summary.to_csv(
+            cumulative_ts_summary_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
 
     fig, ax = plt.subplots(figsize=(16, 6))
     x = np.arange(len(result))
@@ -2859,6 +3022,7 @@ def run_continuous_5y_test(
         row["output_png"] = str(canonical_png)
         row["times_summary_csv"] = str(times_summary_path)
         row["window_summary_csv"] = str(window_summary_path)
+        row["cumulative_ts_summary_csv"] = str(cumulative_ts_summary_path)
     pd.DataFrame(source_rows).to_csv(out_dir / "image_source_manifest.csv", index=False, encoding="utf-8-sig")
 
     config_payload = {

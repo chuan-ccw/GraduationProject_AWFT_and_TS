@@ -48,9 +48,9 @@ SOURCE_1 = {
 
 SOURCE_2 = {
     "label": "AWFT_reward-REINFORCE",
-    "table_label": "FinRL", # AWFT
-    "reward_type": "v0",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260903_000326_reinforce",
+    "table_label": "AWFT", # AWFT
+    "reward_type": "v7",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260919_220712_reinforce",
     "color": "red",
 }
 
