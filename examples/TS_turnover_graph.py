@@ -29,7 +29,7 @@ from finrl.meta.env_stock_trading.trading_score import (
 # =====================================================
 
 # Only change this folder name when analyzing another completed model.
-INPUT_FOLDER = r"rolling_2018-2025_train3y_test1y_shift1y_20260903_000326_reinforce" #v0
+INPUT_FOLDER = r"rolling_2018-2025_train3y_test1y_shift1y_20260917_010528_reinforce" #v0
                # r"rolling_2018-2025_train3y_test1y_shift1y_20260903_000326_reinforce" #v0
                # r"rolling_2018-2025_train3y_test1y_shift1y_20260904_234026_reinforce"
 
@@ -52,7 +52,7 @@ EXPECTED_TIMES = 5
 
 # v1 = TS: runlen
 # v2 = TS_v2: 1 / runlen
-TS_VERSION = "v1"
+TS_VERSION = "v2"
 
 
 # =====================================================

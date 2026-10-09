@@ -33,7 +33,7 @@ SOURCE_1_FOLDER = (
     r"rolling_2018-2025_train3y_test1y_shift1y_20260912_000936_reinforce"
 )
 SOURCE_2_FOLDER = (
-    r"rolling_2018-2025_train3y_test1y_shift1y_20260904_234026_reinforce"
+    r"rolling_2018-2025_train3y_test1y_shift1y_20260917_010528_reinforce"
 )
 
 EXPERIMENT_ROOT = Path(
@@ -46,7 +46,7 @@ EXPERIMENT_ROOT = Path(
 EXPECTED_TIMES = 5
 
 # v1 = TS: runlen; v2 = TS_v2: 1 / runlen
-TS_VERSION = "v1"
+TS_VERSION = "v2"
 
 REWARD_DISPLAY_NAMES = {
     "v0": "FinRL",

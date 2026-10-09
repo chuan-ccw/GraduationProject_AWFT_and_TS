@@ -42,7 +42,7 @@ SOURCE_1 = {
     "label": "FinRL_reward-REINFORCE",
     "table_label": "FinRL",
     "reward_type": "v0",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260903_000326_reinforce",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260912_000936_reinforce",
     "color": "blue",
 }
 
@@ -57,7 +57,7 @@ SOURCE_2 = {
 SOURCES = [SOURCE_1, SOURCE_2]
 
 # "annual_reset" 或 "continuous_5y"
-COMPARE_DATA_MODE = "annual_reset"
+COMPARE_DATA_MODE = "continuous_5y"
 
 # 留空會自動使用時間戳記建立資料夾。
 COMPARE_NAME = ""

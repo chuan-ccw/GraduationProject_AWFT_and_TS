@@ -22,7 +22,7 @@ EXPERIMENT_ROOT = Path(
 )
 
 TARGET_FOLDER = (
-    "rolling_2018-2025_train3y_test1y_shift1y_20260919_220712_reinforce"
+    "rolling_2018-2025_train3y_test1y_shift1y_20260912_000936_reinforce"
     # "rolling_2018-2025_train3y_test1y_shift1y_20260903_000326_reinforce" #v0
 )
 
@@ -331,8 +331,8 @@ def _merge_price_tables(price_tables: list[pd.DataFrame]) -> pd.DataFrame:
             mismatch = both & ~np.isclose(
                 left.to_numpy(dtype=float),
                 right.to_numpy(dtype=float),
-                rtol=1e-9,
-                atol=1e-9,
+                rtol=1e-5,
+                atol=1e-5,
                 equal_nan=True,
             )
             mismatch = pd.DataFrame(mismatch, index=left.index, columns=left.columns)

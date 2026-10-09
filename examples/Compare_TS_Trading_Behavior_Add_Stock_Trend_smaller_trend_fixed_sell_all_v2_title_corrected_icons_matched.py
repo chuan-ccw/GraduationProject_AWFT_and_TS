@@ -34,7 +34,7 @@ SOURCE_1_FOLDER = (
     r"rolling_2018-2025_train3y_test1y_shift1y_20260912_000936_reinforce"
 )
 SOURCE_2_FOLDER = (
-    r"rolling_2018-2025_train3y_test1y_shift1y_20260904_234026_reinforce"
+    r"rolling_2018-2025_train3y_test1y_shift1y_20260917_010528_reinforce"
 )
 
 EXPERIMENT_ROOT = Path(
@@ -47,7 +47,7 @@ EXPERIMENT_ROOT = Path(
 EXPECTED_TIMES = 5
 
 # v1 = TS: runlen; v2 = TS_v2: 1 / runlen
-TS_VERSION = "v1"
+TS_VERSION = "v2"
 
 REWARD_DISPLAY_NAMES = {
     "v0": "FinRL",
@@ -252,6 +252,63 @@ def stock_columns_from_action_holdings(
     ]
 
 
+def build_plot_behavior_matrix(
+    actions: pd.DataFrame,
+    holdings: pd.DataFrame,
+    stock_order: list[str],
+    dates: list[str],
+) -> pd.DataFrame:
+    """Build plot-only action labels without changing Trading Score actions.
+
+    FinRL saves actions with the trade-date label, but holdings_memory starts
+    with the pre-trade state. Therefore the holdings row at the next trading
+    date represents the position remaining after the current day's action.
+
+    For each stock:
+    - Buy: action > 0.
+    - Partially Sell: action < 0 and shares remain after the trade.
+    - Sell All: action < 0 and shares become zero after the trade.
+    Hold/None are intentionally not plotted.
+    """
+    action_values = (
+        actions.set_index("date")
+        .reindex(dates)[stock_order]
+        .apply(pd.to_numeric, errors="coerce")
+    )
+
+    holdings_by_date = (
+        holdings.set_index("date")[stock_order]
+        .apply(pd.to_numeric, errors="coerce")
+    )
+
+    # holdings(date=t) is the position before Action(t).
+    # The next holdings row is the position after Action(t).
+    post_trade_holdings = holdings_by_date.shift(-1).reindex(dates)
+
+    action_eps = float(getattr(ts_graph, "ACTION_EPS", 1e-12))
+    holding_zero_eps = max(action_eps, 1e-6)
+
+    behavior = pd.DataFrame(
+        "None",
+        index=dates,
+        columns=stock_order,
+        dtype=object,
+    )
+
+    buy_mask = action_values > action_eps
+    sell_mask = action_values < -action_eps
+    remaining_mask = post_trade_holdings > holding_zero_eps
+    cleared_mask = post_trade_holdings.abs() <= holding_zero_eps
+
+    partially_sell_mask = sell_mask & remaining_mask
+    sell_all_mask = sell_mask & cleared_mask
+
+    behavior[buy_mask] = "Buy"
+    behavior[partially_sell_mask] = "Partially Sell"
+    behavior[sell_all_mask] = "Sell All"
+    return behavior
+
+
 def load_source_times(
     window_dir: Path,
     times_dir: Path,
@@ -281,7 +338,13 @@ def load_source_times(
         test_end=test_end,
     )
 
-    act, behavior = ts_graph.build_action_matrix(
+    act, _ = ts_graph.build_action_matrix(
+        actions,
+        holdings,
+        stock_order=stock_order,
+        dates=dates,
+    )
+    behavior = build_plot_behavior_matrix(
         actions,
         holdings,
         stock_order=stock_order,
@@ -605,23 +668,26 @@ MARKER_STYLES = {
     "Buy": {
         "marker": "^",
         "s": 32,
+        "line_s": 72,
         "facecolors": "#FF0000",
         "edgecolors": "white",
         "linewidths": 0.45,
         "alpha": 1.0,
     },
-    "Hold": {
-        "marker": "o",
-        "s": 11,
-        "facecolors": "#474747",
-        "edgecolors": "none",
-        "linewidths": 0.0,
-        "alpha": 0.50,
-    },
-    "Sell": {
+    "Partially Sell": {
         "marker": "v",
         "s": 32,
-        "facecolors": "#008000",
+        "line_s": 72,
+        "facecolors": "#006eff",
+        "edgecolors": "white",
+        "linewidths": 0.45,
+        "alpha": 1.0,
+    },
+    "Sell All": {
+        "marker": "X",
+        "s": 32,
+        "line_s": 72,
+        "facecolors": "#00d40b",
         "edgecolors": "white",
         "linewidths": 0.45,
         "alpha": 1.0,
@@ -738,27 +804,26 @@ def _add_right_legends(
         fontsize=13,
         fontweight="semibold",
     )
-    action_y = {"Buy": 0.61, "Hold": 0.39, "Sell": 0.17}
-    for action_name in ["Buy", "Hold", "Sell"]:
+    action_y = {"Buy": 0.61, "Partially Sell": 0.39, "Sell All": 0.17}
+    for action_name in ["Buy", "Partially Sell", "Sell All"]:
         style = MARKER_STYLES[action_name]
         action_ax.scatter(
-            [0.28],
+            [0.24],
             [action_y[action_name]],
             marker=style["marker"],
-            # s=92 if action_name != "Hold" else 50,
-            s=150 if action_name != "Hold" else 85,
+            s=185,
             facecolors=style["facecolors"],
             edgecolors=style["edgecolors"],
-            linewidths=0.7 if action_name != "Hold" else 0.0,
+            linewidths=0.8,
             alpha=style["alpha"],
         )
         action_ax.text(
-            0.48,
+            0.43,
             action_y[action_name],
             action_name,
             ha="left",
             va="center",
-            fontsize=12.5,
+            fontsize=11.5,
         )
 
     # Trend box.
@@ -865,8 +930,8 @@ def _plot_single_stock_action_line(
     ax.plot(
         x,
         y,
-        color="#5DA5DA",
-        linewidth=1.8,
+        color="#000000",
+        linewidth=1,
         zorder=2,
     )
 
@@ -879,7 +944,7 @@ def _plot_single_stock_action_line(
             x[mask],
             y[mask],
             marker=style["marker"],
-            s=style["s"],
+            s=style["line_s"],
             facecolors=style["facecolors"],
             edgecolors=style["edgecolors"],
             linewidths=style["linewidths"],
@@ -926,7 +991,13 @@ def plot_single_stock_compare(
         raise ValueError(f"Single-stock price series contains missing values: {ticker}")
 
     fig_width = max(18.0, min(28.0, len(dates) / 10.0))
-    fig, axes = plt.subplots(3, 1, figsize=(fig_width, 6.8), sharex=True)
+    fig, axes = plt.subplots(
+        3,
+        1,
+        figsize=(fig_width, 6.8),
+        sharex=True,
+        gridspec_kw={"height_ratios": [0.30, 1.0, 1.0]},
+    )
     trend_ax, ax1, ax2 = axes
 
     trend_ax.imshow(
@@ -1071,8 +1142,8 @@ def plot_compare_heatmap(
     ax.set_title(
         "Stock Trend x Agent Action\n"
         f"{year_label} | {times_label} | "
-        f"{source_1_name} Annual TS: {source_1_annual_ts:.2f} | "
-        f"{source_2_name} Annual TS: {source_2_annual_ts:.2f}",
+        f"{source_1_name} Average Annual TS: {source_1_annual_ts:.2f} | "
+        f"{source_2_name} Average Annual TS: {source_2_annual_ts:.2f}",
         fontsize=18,
         fontweight="normal",
         pad=14,
