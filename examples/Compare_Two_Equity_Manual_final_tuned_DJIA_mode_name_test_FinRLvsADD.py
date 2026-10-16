@@ -44,20 +44,20 @@ SOURCE_1 = {
     "reward_type": "v0",
     "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260912_000936_reinforce",
     "color": "blue",
-}
+}   
 
 SOURCE_2 = {
-    "label": "AWFT_reward-REINFORCE",
+    "label": "AWFT add feature",
     "table_label": "AWFT",
     "reward_type": "v7",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260904_234026_reinforce",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20261013_230157_reinforce",
     "color": "red",
 }
 
 SOURCES = [SOURCE_1, SOURCE_2]
 
 # "annual_reset" 或 "continuous_5y"
-COMPARE_DATA_MODE = "annual_reset"
+COMPARE_DATA_MODE = "continuous_5y"
 
 # 留空會自動使用時間戳記建立資料夾。
 COMPARE_NAME = ""
@@ -344,6 +344,19 @@ def _set_jan_may_sep_xticks(ax, dates: pd.Series) -> None:
         label.set_horizontalalignment("left")
 
 
+def _current_mode_name_for_filename() -> str:
+    mode = str(COMPARE_DATA_MODE or "").strip().lower()
+    if mode in {"annual_reset", "times"}:
+        return "annual_reset"
+    if mode in {"continuous", "continuous_5y", "continuous5y"}:
+        return "continuous_5y"
+    return _safe_name(mode or "unknown_mode")
+
+
+def get_plot_filename() -> str:
+    return f"compare_portfolio_value_{_current_mode_name_for_filename()}.png"
+
+
 def make_compare_dir() -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if COMPARE_NAME.strip():
@@ -435,7 +448,7 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path) -> None:
     plt.tight_layout()
 
     fig.savefig(
-        compare_dir / "compare_portfolio_value.png",
+        compare_dir / get_plot_filename(),
         dpi=150,
         bbox_inches="tight",
     )
@@ -491,7 +504,7 @@ def write_outputs(
         for source_csv in df.attrs.get("source_csvs", []):
             manifest_rows.append(
                 {
-                    "plot": "compare_portfolio_value.png",
+                    "plot": get_plot_filename(),
                     "source_index": index,
                     "label": source["label"],
                     "reward_type": source["reward_type"],
@@ -524,7 +537,7 @@ def write_outputs(
             for source, root in zip(SOURCES, roots)
         ],
         "x_axis_format": "YYYY-MM",
-        "plot": "compare_portfolio_value.png",
+        "plot": get_plot_filename(),
     }
     (compare_dir / "compare_config.json").write_text(
         json.dumps(config_payload, ensure_ascii=False, indent=2),

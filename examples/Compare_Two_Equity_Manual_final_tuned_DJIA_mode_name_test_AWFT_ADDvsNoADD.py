@@ -39,10 +39,10 @@ EXPERIMENT_ROOT = os.environ.get(
 # r"C:\Users\User\Desktop\GraduationProject\Experence_result\reward_v0\rolling_..."
 # 也可只填 rolling_* 資料夾名稱。
 SOURCE_1 = {
-    "label": "FinRL_reward-REINFORCE",
-    "table_label": "FinRL",
-    "reward_type": "v0",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260912_000936_reinforce",
+    "label": "AWFT add feature",
+    "table_label": "AWFT",
+    "reward_type": "v7",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20261013_230157_reinforce",
     "color": "blue",
 }
 
@@ -50,7 +50,7 @@ SOURCE_2 = {
     "label": "AWFT_reward-REINFORCE",
     "table_label": "AWFT",
     "reward_type": "v7",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260904_234026_reinforce",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260917_010528_reinforce",
     "color": "red",
 }
 
@@ -143,7 +143,7 @@ def build_compare_dataframe(dataframes: list[pd.DataFrame]) -> pd.DataFrame:
 
     merged = merged.sort_values("date").reset_index(drop=True)
 
-    # Prefer the DJI series already stored in source outputs.
+    # Prefer the DJIA series already stored in source outputs.
     merged["dji_mean_norm"] = np.nan
     for index in range(1, 3):
         dji_col = f"source{index}_dji"
@@ -151,7 +151,7 @@ def build_compare_dataframe(dataframes: list[pd.DataFrame]) -> pd.DataFrame:
             merged["dji_mean_norm"] = pd.to_numeric(merged[dji_col], errors="coerce")
             break
 
-    # Keep old behavior: if no stored DJI is available, try to build it from trade dates.
+    # Keep old behavior: if no stored DJIA is available, try to build it from trade dates.
     if not pd.to_numeric(merged["dji_mean_norm"], errors="coerce").notna().any():
         dji = legacy_compare.build_dji_baseline(
             merged["date"].tolist(),
@@ -189,12 +189,12 @@ def _annual_return_percent(
 
 
 def _add_annual_performance_table(ax, merged: pd.DataFrame) -> None:
-    """Add the 3x6 annual performance table inside the 2021 lower-left area."""
+    """Add the 4x6 annual performance table inside the 2021 lower-left area."""
     parsed_dates = pd.to_datetime(merged["date"], errors="coerce")
     years = sorted(int(year) for year in parsed_dates.dt.year.dropna().unique())
 
-    # The current experiment is a 5-year test, so this becomes a 3x6 table:
-    # header row + two reward rows, and label column + five year columns.
+    # The current experiment is a 5-year test, so this becomes a 4x6 table:
+    # header row + two reward rows + DJIA row, and label column + five year columns.
     years = years[:5]
     if not years:
         return
@@ -208,6 +208,14 @@ def _add_annual_performance_table(ax, merged: pd.DataFrame) -> None:
             ret = _annual_return_percent(merged[mean_col], merged["date"], year)
             row.append("N/A" if not np.isfinite(ret) else f"{ret:.2f}%")
         table_rows.append(row)
+
+    # Add DJIA benchmark annual cumulative returns to the same table.
+    dji = pd.to_numeric(merged["dji_mean_norm"], errors="coerce")
+    row = ["DJIA"]
+    for year in years:
+        ret = _annual_return_percent(dji, merged["date"], year)
+        row.append("N/A" if not np.isfinite(ret) else f"{ret:.2f}%")
+    table_rows.append(row)
 
     # Keep the table below the y=1.0 line and to the left of the 2022 boundary.
     ax.text(
@@ -242,6 +250,8 @@ def _add_annual_performance_table(ax, merged: pd.DataFrame) -> None:
     # Match the strategy names in the table with their equity-line colors.
     table[(1, 0)].get_text().set_color(SOURCE_1["color"])
     table[(2, 0)].get_text().set_color(SOURCE_2["color"])
+    if (3, 0) in table.get_celld():
+        table[(3, 0)].get_text().set_color("tab:green")
 
 
 def _plot_equity_line(
@@ -334,6 +344,19 @@ def _set_jan_may_sep_xticks(ax, dates: pd.Series) -> None:
         label.set_horizontalalignment("left")
 
 
+def _current_mode_name_for_filename() -> str:
+    mode = str(COMPARE_DATA_MODE or "").strip().lower()
+    if mode in {"annual_reset", "times"}:
+        return "annual_reset"
+    if mode in {"continuous", "continuous_5y", "continuous5y"}:
+        return "continuous_5y"
+    return _safe_name(mode or "unknown_mode")
+
+
+def get_plot_filename() -> str:
+    return f"compare_portfolio_value_{_current_mode_name_for_filename()}.png"
+
+
 def make_compare_dir() -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if COMPARE_NAME.strip():
@@ -379,7 +402,7 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path) -> None:
     dji = pd.to_numeric(merged["dji_mean_norm"], errors="coerce")
     if dji.notna().any():
         ret = _strategy_return_percent(dji)
-        dji_label = "DJI" if is_annual_reset else f"DJI ({ret:.2f}%)"
+        dji_label = "DJIA" if is_annual_reset else f"DJIA ({ret:.2f}%)"
         _plot_equity_line(
             ax,
             x,
@@ -425,7 +448,7 @@ def plot_compare(merged: pd.DataFrame, compare_dir: Path) -> None:
     plt.tight_layout()
 
     fig.savefig(
-        compare_dir / "compare_portfolio_value.png",
+        compare_dir / get_plot_filename(),
         dpi=150,
         bbox_inches="tight",
     )
@@ -462,7 +485,7 @@ def write_outputs(
     if not dji_values.empty:
         summary_rows.append(
             {
-                "strategy": "DJI",
+                "strategy": "DJIA",
                 "reward_type": "benchmark",
                 "rolling_root": "",
                 "final_normalized_value": float(dji_values.iloc[-1]),
@@ -481,7 +504,7 @@ def write_outputs(
         for source_csv in df.attrs.get("source_csvs", []):
             manifest_rows.append(
                 {
-                    "plot": "compare_portfolio_value.png",
+                    "plot": get_plot_filename(),
                     "source_index": index,
                     "label": source["label"],
                     "reward_type": source["reward_type"],
@@ -514,7 +537,7 @@ def write_outputs(
             for source, root in zip(SOURCES, roots)
         ],
         "x_axis_format": "YYYY-MM",
-        "plot": "compare_portfolio_value.png",
+        "plot": get_plot_filename(),
     }
     (compare_dir / "compare_config.json").write_text(
         json.dumps(config_payload, ensure_ascii=False, indent=2),

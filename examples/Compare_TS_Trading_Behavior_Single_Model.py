@@ -31,7 +31,7 @@ from finrl.meta.env_stock_trading.trading_score import (
 # 平常只需要修改下面這個 rolling 資料夾名稱。
 # 可填 rolling_* 資料夾名稱，也可填完整路徑。
 SOURCE_FOLDER = (
-    r"rolling_2018-2025_train3y_test1y_shift1y_20260912_000936_reinforce"
+    r"rolling_2018-2025_train3y_test1y_shift1y_20260917_010528_reinforce"
 )
 
 EXPERIMENT_ROOT = Path(

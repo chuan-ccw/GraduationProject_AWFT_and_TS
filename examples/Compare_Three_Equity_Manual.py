@@ -41,28 +41,28 @@ EXPERIMENT_ROOT = os.environ.get(
 SOURCE_1 = {
     "label": "FinRL_reward",
     "reward_type": "v0",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260903_000326_reinforce",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260912_000936_reinforce",
     "color": "blue",
 }
 
 SOURCE_2 = {
-    "label": "AWFT scale = 200",
+    "label": "AWFT add Feature (OHLV)",
     "reward_type": "v7",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260902_001851_reinforce",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20261013_185044_reinforce",
     "color": "red",
 }
 
 SOURCE_3 = {
-    "label": "AWFT correct scale",
+    "label": "AWFT_reward",
     "reward_type": "v7",
-    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260904_234026_reinforce",
+    "rolling": r"rolling_2018-2025_train3y_test1y_shift1y_20260917_010528_reinforce",
     "color": "black",
 }
 
 SOURCES = [SOURCE_1, SOURCE_2, SOURCE_3]
 
 # "annual_reset" 或 "continuous_5y"
-COMPARE_DATA_MODE = "continuous_5y"
+COMPARE_DATA_MODE = "annual_reset"
 
 # 留空會自動使用時間戳記建立資料夾。
 COMPARE_NAME = ""
