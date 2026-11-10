@@ -22,16 +22,14 @@ from finrl.meta.env_stock_trading.trading_score import (
     normalize_ts_version,
 )
 
-#畫Stock Trend x Agent Action (換手圖) (單Agent)
+#畫Stock Trend x Agent Action (換手圖) (單Agent) 舊圖例別用了
 
 # =====================================================
 # 1. User setting
 # =====================================================
 
 # Only change this folder name when analyzing another completed model.
-INPUT_FOLDER = r"rolling_2018-2025_train3y_test1y_shift1y_20260917_010528_reinforce" #v0
-               # r"rolling_2018-2025_train3y_test1y_shift1y_20260903_000326_reinforce" #v0
-               # r"rolling_2018-2025_train3y_test1y_shift1y_20260904_234026_reinforce"
+INPUT_FOLDER = r"rolling_2018-2025_train3y_test1y_shift1y_20260912_000936_reinforce" 
 
 
 # Same experiment root style used by the current Compare / score scripts.
